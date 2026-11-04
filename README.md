@@ -1,0 +1,51 @@
+# DeskAct
+
+DeskAct is a Windows-first, accessibility-first desktop assistant for finding, opening, and controlling supported apps. The product is in the specification and Windows validation stage; the DeskAct application is not yet released. See the [Product Requirements Document](docs/DeskAct_PRD_v1.9.md).
+
+## Automation tools are installed separately
+
+DeskAct does **not** bundle, download, or update `agent-desktop` or `agent-browser`. Install them yourself from their upstream npm packages. DeskAct checks for the expected CLI version when it needs that capability and provides setup guidance if the tool is missing or incompatible.
+
+### Prerequisite
+
+Install Node.js **24 or later** and npm. This satisfies the current `agent-browser` baseline; `agent-desktop` itself documents Node.js 18 or later.
+
+### Native desktop control — required
+
+In Windows PowerShell:
+
+```powershell
+npm install --global agent-desktop@1.1.0
+agent-desktop version
+agent-desktop status
+```
+
+`agent-desktop` is required for native desktop control. If it is missing or incompatible, native tasks are unavailable until you install a supported version. DeskAct will not install it automatically.
+
+### Browser control — optional until Phase 3
+
+Browser automation is best-effort and is not required for native desktop use. When browser support is enabled, install the documented baseline:
+
+```powershell
+npm install --global agent-browser@0.41.2
+npm list --global agent-browser --depth=0
+```
+
+`agent-browser@0.41.2` may download Chrome for Testing separately when managed Chrome is needed:
+
+```powershell
+agent-browser install
+```
+
+This download is separate from npm installation. If you use an existing Microsoft Edge instance through authorized loopback CDP, follow the [CDP setup guide](https://agent-browser.dev/cdp-mode) instead. Missing or incompatible `agent-browser` disables browser tasks only; it does not block native DeskAct use. DeskAct will not install the package or browser automatically.
+
+### Troubleshooting
+
+- If PowerShell cannot find a CLI after installation, open a new terminal and check that the npm global bin directory is on `PATH`.
+- The browser package declares Node.js `>=24`. Check with `node --version` if installation or execution reports an engine mismatch.
+- A TLS `UnknownIssuer` error while downloading Chrome for Testing indicates the machine does not trust the certificate chain. Do not disable TLS verification; resolve the trust configuration with your IT administrator, or use an authorized existing Edge/CDP setup.
+
+## Upstream package and license information
+
+- [`agent-desktop@1.1.0`](https://www.npmjs.com/package/agent-desktop) · [upstream repository](https://github.com/vercel-labs/agent-desktop) · [Apache-2.0 license](https://github.com/vercel-labs/agent-desktop/blob/v1.1.0/LICENSE)
+- [`agent-browser@0.41.2`](https://www.npmjs.com/package/agent-browser) · [upstream repository](https://github.com/vercel-labs/agent-browser) · [Apache-2.0 license](https://github.com/vercel-labs/agent-browser/blob/v0.41.2/LICENSE)
