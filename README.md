@@ -1,6 +1,6 @@
 # DeskAct
 
-DeskAct is a Windows-first, accessibility-first desktop assistant for finding, opening, and controlling supported apps. The product is in the specification and Windows validation stage; the DeskAct application is not yet released. See the [Product Requirements Document](docs/DeskAct_PRD_v1.9.md).
+DeskAct is a Windows-first, accessibility-first desktop assistant for finding, opening, and controlling supported apps. The product is in the specification and Windows validation stage; the DeskAct application is not yet released. See the [Product Requirements Document](docs/DeskAct_PRD_v1.10.md).
 
 ## Automation tools are installed separately
 
@@ -44,6 +44,10 @@ This download is separate from npm installation. If you use an existing Microsof
 - If PowerShell cannot find a CLI after installation, open a new terminal and check that the npm global bin directory is on `PATH`.
 - The browser package declares Node.js `>=24`. Check with `node --version` if installation or execution reports an engine mismatch.
 - A TLS `UnknownIssuer` error while downloading Chrome for Testing indicates the machine does not trust the certificate chain. Do not disable TLS verification; resolve the trust configuration with your IT administrator, or use an authorized existing Edge/CDP setup.
+
+## License
+
+DeskAct's source code and documentation are licensed under the [Apache License 2.0](LICENSE). Copyright © 2026 Eguin Jonathan. This project license applies to DeskAct materials; independently installed third-party tools remain under their respective upstream licenses. Third-party components shipped inside a future DeskAct release will retain their own license terms and required notices.
 
 ## Upstream package and license information
 

@@ -7,9 +7,9 @@
 **GitHub repository (proposed):** `deskact`  
 **Repository description:** An open-source AI desktop agent for Windows. Control native apps, browsers, and system tasks with natural language or voice. Built with Rust + Tauri.
 
-**Version:** 1.9 — User-installed automation tools; no bundled sidecars
+**Version:** 1.10 — Apache-2.0 project license
 **Date:** 4 November 2026  
-**Status:** v1.9 distribution choice recorded / native Phase 0 validation pending
+**Status:** Apache-2.0 project license and no-bundled-sidecar distribution recorded / native Phase 0 validation pending
 **Initial platform:** Windows 10/11; other desktop platforms are out of MVP scope  
 **Product form:** **One user-facing DeskAct application and installer.** Modular Rust orchestrator in the Tauri host process; a development-only terminal harness in Phase 1; Tauri text HUD enabled in Phase 2. Users install automation CLIs separately; DeskAct does not bundle or auto-install them.
 
@@ -251,7 +251,7 @@ flowchart TB
 - `agent-browser` is optional until browser support is enabled in Phase 3. Its absence or incompatibility disables only browser tasks and must not block native DeskAct use.
 - Preflight each CLI via PATH/configuration and verify the reported version/JSON contract before launching tasks. Do not run npm or download tool/browser binaries from inside DeskAct.
 - `agent-browser@0.41.2` declares Node.js >=24 and downloads Chrome for Testing separately with `agent-browser install`. Document this as an optional browser prerequisite; do not disable TLS validation to work around certificate errors.
-- Link upstream package and license information in the README. DeskAct does not redistribute the sidecar artifacts, so do not package their binaries or third-party notices in the DeskAct installer. This does not settle DeskAct's own license or external upstream package terms.
+- DeskAct source code and documentation are licensed under Apache-2.0 (`LICENSE`). Separately installed tools remain under their upstream licenses. Since DeskAct does not redistribute those tools, do not package their binaries or notices in the DeskAct installer. Independently audit all third-party code/assets shipped inside DeskAct (including application dependencies) and include their required notices; a sidecar redistribution audit is required if the distribution choice later changes.
 
 ### 6.5 Dynamic OpenAI-compatible provider configuration
 
@@ -727,31 +727,35 @@ These investigations do not require introducing a new AI router or additional pr
 
 ## 21. Change Control
 
-### 21.1 v1.9 vs v1.8 — User-installed automation tools
+### 21.1 v1.10 vs v1.9 — Apache-2.0 project license
+
+- **Project license:** DeskAct source code and documentation are licensed under Apache-2.0, recorded in the root `LICENSE` file. Separately installed automation tools retain their upstream licenses.
+
+### 21.2 v1.9 vs v1.8 — User-installed automation tools
 
 - **No bundled sidecars:** Users install `agent-desktop` 1.1.0 and optional `agent-browser` 0.41.2 themselves; DeskAct does not install/update tools.
 - **Capability gating:** Native control requires a compatible `agent-desktop`; missing `agent-browser` disables browser tasks only and does not block native use.
 - **Runtime setup:** Document Node.js >=24 and separate Chrome for Testing provisioning for the browser baseline; do not bypass TLS validation.
 - **Installer:** Include only DeskAct, not automation CLIs or their third-party notices; link to the upstream install and license pages.
 
-### 21.2 v1.8 vs v1.7 — Native-first Phase 0 and deferred browser gate
+### 21.3 v1.8 vs v1.7 — Native-first Phase 0 and deferred browser gate
 
 - **Native gate:** Phase 0 validates only the Windows native `agent-desktop` path. Native Phase 1 is not blocked by browser installation, CDP, or distribution issues.
 - **Browser gate:** Defer `agent-browser` installation and Edge/CDP validation to Phase 3; browser support remains best-effort and separate from the native reliability baseline.
 
-### 21.3 v1.7 vs v1.6 — App discovery and user configuration
+### 21.4 v1.7 vs v1.6 — App discovery and user configuration
 
 - **Discovery:** Resolve apps from Windows Start Menu shortcuts and registered app entries; uniquely identified apps launch directly without an extra confirmation.
 - **Custom apps:** Users manage app display names, targets, and aliases through a simple in-app settings UI; entries persist locally and are not auto-learned.
 - **Ambiguity and control:** Show candidates and ask rather than choose randomly; control discovered/configured apps only when usable accessibility controls are observed. Do not use arbitrary shell strings or blind coordinate actions.
 
-### 21.4 v1.6 vs v1.5 — Hands-free voice interaction
+### 21.5 v1.6 vs v1.5 — Hands-free voice interaction
 
 - **Voice input:** English PTT with Groq-first STT behind an adapter; successful transcripts are displayed and automatically routed without keyboard submit; local STT is deferred.
 - **Voice output:** Groq-first English TTS behind an adapter; concise clarifications, approval prompts, and outcomes are spoken; local TTS is deferred and playback is interruptible.
 - **Privacy and safety:** Separate provider-specific opt-ins for cloud STT audio and cloud TTS text; raw audio is discarded after transcription. PTT can answer prompts; consequential actions require a clear spoken `approve` after the exact action is stated.
 
-### 21.5 v1.5 vs v1.4 — Power-user navigation scope and safety gates
+### 21.6 v1.5 vs v1.4 — Power-user navigation scope and safety gates
 
 - **Audience and value:** Focus on technically comfortable power users seeking faster PC navigation and control.
 - **App coverage:** Broad, capability-dependent app ambition with a named acceptance corpus (Notepad, File Explorer, Calculator, VLC, Microsoft Edge); browser automation is best-effort and native workflows remain the reliability baseline.
@@ -759,7 +763,7 @@ These investigations do not require introducing a new AI router or additional pr
 - **Phase 0:** Explicit go/no-go before Phase 1, with Windows runtime, target identification, tool contract, and verification evidence.
 - **Reliability:** 19/20 remains specific to controlled Notepad scenarios.
 
-### 21.6 v1.4 vs v1.3 — One-app deployment and configurable LLM endpoints
+### 21.7 v1.4 vs v1.3 — One-app deployment and configurable LLM endpoints
 
 - **Deployment boundary:** One user-facing DeskAct Tauri desktop app/installer. The Rust router, orchestrator, executor, tool manager and LLM client are in-process modules rather than separately deployed services.
 - **CLI role:** Phase 1 retains a *development-only console test harness*; no standalone end-user `deskact-cli` is shipped by default.
@@ -770,14 +774,14 @@ These investigations do not require introducing a new AI router or additional pr
 - **Scope unchanged:** Accessibility-first desktop control, closed-loop verification, bounded safe recovery, hotkey/PTT UI and staged browser support.
 
 
-### 21.7 v1.3 vs v1.2 — Product naming and presentation
+### 21.8 v1.3 vs v1.2 — Product naming and presentation
 
 - **Product name:** Changed from the original internal working title to **DeskAct** throughout the document and all Mermaid diagrams.
 - **Public-facing positioning:** **DeskAct — AI Desktop Agent for Windows**. Tagline: *Tell your computer what to do. DeskAct gets it done.*
 - **Historical v1.3 workspace naming:** Proposed repository `deskact`; at that revision the workspace included `deskact-core`, `deskact-tools`, `deskact-cli`, and `deskact-hud`. **Superseded by the single-app structure in v1.4.**
 - **Architecture and MVP scope unchanged:** Rust/Tokio core, Tauri v2 HUD, deterministic routing with one primary LLM fallback, accessibility-first native automation, verified execution loop, and the phased roadmap are retained.
 
-### 21.8 v1.2 vs v1.1 — Routing simplification and operational flow
+### 21.9 v1.2 vs v1.1 — Routing simplification and operational flow
 
 - **Simplified AI routing:** Deterministic Rust command/workflow registry → **one primary LLM fallback**. No Laya, System 1 classifier, lightweight learned router or secondary LLM in MVP.
 - **Added user-facing operational flow:** PTT/text/CLI → DeskAct app/task API → deterministic router → LLM if unmatched → policy → Rust agent loop → `agent-desktop` / `agent-browser` / OS → verification → recovery / result.
