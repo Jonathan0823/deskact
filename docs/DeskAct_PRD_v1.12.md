@@ -7,9 +7,9 @@
 **GitHub repository (proposed):** `deskact`  
 **Repository description:** An open-source AI desktop agent for Windows. Control native apps, browsers, and system tasks with natural language or voice. Built with Rust + Tauri.
 
-**Version:** 1.11 — OpenAI-compatible LLM capability contract
+**Version:** 1.12 — Phase 3 browser support boundary
 **Date:** 4 November 2026  
-**Status:** LLM capability contract, Apache-2.0 project license, and no-bundled-sidecar distribution recorded / native Phase 0 validation pending
+**Status:** Browser support boundary, LLM contract, Apache-2.0 project license, and no-bundled-sidecar distribution recorded / native Phase 0 validation pending
 **Initial platform:** Windows 10/11; other desktop platforms are out of MVP scope  
 **Product form:** **One user-facing DeskAct application and installer.** Modular Rust orchestrator in the Tauri host process; a development-only terminal harness in Phase 1; Tauri text HUD enabled in Phase 2. Users install automation CLIs separately; DeskAct does not bundle or auto-install them.
 
@@ -201,7 +201,7 @@ flowchart TB
 | Tracing | `tracing` / structured local logs |
 | Phase 1 test harness | Development-only Rust example / test target using the same core; not a shipped CLI product |
 | Native automation | User-installed `agent-desktop` CLI, version-checked and launched on demand using bounded subprocess calls |
-| Web automation | User-installed, optional `agent-browser` CLI (best-effort browser capability, staged after native baseline), invoking reusable tool-managed session/daemon only when needed |
+| Web automation | User-installed, optional `agent-browser` CLI; Edge is the initial target, Helium exploratory; attach only to a dedicated user-launched CDP profile |
 | Desktop packaging (Phase 2) | **One Tauri v2 application/installer**; React/Tailwind WebView; automation sidecars are not included |
 | Voice (Phase 2b) | English-only PTT; Groq-first STT/TTS behind adapters, with local alternatives deferred; explicit separate provider opt-ins; raw audio discarded after transcription |
 | LLM integration | Configurable Chat Completions endpoint/model/key; complete JSON action plans validated locally; provider schema enforcement optional; no LLM child process |
@@ -228,7 +228,7 @@ flowchart TB
     MANAGER -->|"Allowlisted invocation"| OS["OS child processes<br/>on-demand"]
     BROWSER <--> DAEMON["Optional tool-managed browser daemon/session"]
     DESKTOP --> APPS["Native Windows apps"]
-    DAEMON <-->|"Loopback CDP"| CHROME["User-installed Microsoft Edge / supported Chromium"]
+    DAEMON <-->|"Verified loopback CDP"| BROWSER_TARGET["User-launched dedicated Edge profile<br/>Helium exploratory only"]
     OS --> WIN["Windows system"]
     CLIENT <-->|"HTTPS or loopback HTTP"| LLM["Independent local / remote LLM endpoint"]
 ```
@@ -237,7 +237,7 @@ flowchart TB
 
 1. **DeskAct host:** Runs while the user has DeskAct open; owns task queues, approvals, cancellation, event reporting, and tool-manager state.
 2. **`agent-desktop` CLI:** Start only when a native step needs it; await result, parse structured output and exit. Preserve relevant logical session/snapshot references between invocations as supported by the pinned version; stale references still require re-observation.
-3. **`agent-browser` CLI:** Start a command on demand; reuse the tool's browser daemon/session when the selected version supports it. Do **not** spawn a new browser or destroy the authenticated session for every action. The browser is user-owned unless explicitly started by DeskAct.
+3. **`agent-browser` CLI:** Start commands on demand and attach only to an already-running, user-launched dedicated Edge profile after verifying that the CDP listener is loopback-only and remote debugging is permitted. DeskAct does not launch or terminate the browser. Users may sign in manually to the dedicated profile; its cookies, authentication, and site data are visible to the attached automation. When needed for a user-requested task, only the minimum relevant page context may be sent to the configured primary LLM, with this behavior disclosed; page content is untrusted. Never attach to the everyday profile or import/export saved session state, cookies, or tokens. Tab pinning scopes the target tab but does not isolate browser data. Helium is exploratory until it passes the same Windows checks.
 4. **OS children:** Launch approved programs or file operations on demand. A launched user application may continue after the invocation returns; its lifetime is not tied to the CLI command lifetime.
 5. **LLM endpoint:** Never managed as a DeskAct child process. Connect to a configured **external** HTTP API; `localhost` endpoints are also external to the DeskAct process and started by the user or a separate app.
 6. **Shutdown and cancellation:** Stop scheduling new steps, cancel active requests where feasible, enforce subprocess deadlines, terminate **only DeskAct-owned** child processes where safe, and do not kill unrelated apps, browsers or local model servers.
@@ -406,7 +406,7 @@ flowchart TD
 
 **BRW-01:** Connect only to an explicitly enabled, authorized CDP endpoint on loopback (default candidate `127.0.0.1:9222`), subject to browser support and user configuration.
 
-**BRW-02:** Confirm that Microsoft Edge or another explicitly selected Chromium browser exposes a compatible debugging endpoint; an existing normal browser profile is not assumed attachable. The initial controlled browser check uses Microsoft Edge when available.
+**BRW-02:** Microsoft Edge on Windows is the initial browser target, using a dedicated profile launched separately by the user. Helium is exploratory only; make no support claim for it or other Chromium browsers without equivalent target-machine checks. Never assume an everyday profile is attachable.
 
 **BRW-03:** Identify and pin the intended tab; validate URL/origin and tab identity before mutating actions. Manage tabs separately from desktop windows.
 
@@ -414,7 +414,7 @@ flowchart TD
 
 **BRW-05:** Apply bounded snapshot pruning and compact task summaries only after measuring prompt size and task success; keep essential labels, roles, references and verification evidence.
 
-**BRW-06:** Never expose debugging ports to untrusted network interfaces; do not export cookies, tokens or logged-in session secrets to an LLM.
+**BRW-06:** Never expose debugging ports beyond verified loopback. For a user-requested browser task, send only the minimum relevant page text/accessibility context to the configured primary LLM when needed, disclose this behavior, and treat page content as untrusted. Never send cookies, tokens, saved auth state, or credentials to the LLM.
 
 ## 11. HUD, Hotkeys, Push-to-Talk and Speech (Phase 2)
 
@@ -493,8 +493,10 @@ Every task outcome should include the requested objective, achieved postconditio
 | LLM-01 | Secure credentials; Chat Completions baseline; locally validated JSON action plans; explicit synthetic connection test; optional provider schema enforcement, tool calling, streaming, and model discovery | P0 | 1 |
 | OBS-01 | Structured event trace and honest outcome reporting | P0 | 1 |
 | HUD-01–08 | Tauri overlay, shortcut, text UX, hands-free PTT, speech output, approvals and streaming status | P1 | 2 |
-| BRW-01–06 | Best-effort browser CDP connection, tab handling and web handoff; no native reliability target | P1 | 3 |
-| BRW-07 | Browser CLI is optional; missing/incompatible browser tooling disables browser tasks only, never native use | P1 | 3 |
+| BRW-01–06 | Best-effort Edge CDP attachment, dedicated-profile tab handling, safe navigation, verification and desktop/browser handoff; no native reliability target | P1 | 3 |
+| BRW-07 | Browser CLI is optional; missing/incompatible tooling or unsupported CDP setup disables browser tasks only, never native use | P1 | 3 |
+| BRW-08 | Attach only to a user-launched dedicated profile with verified loopback CDP; never use the everyday profile or import/export saved auth state | P1 | 3 |
+| BRW-09 | Helium is exploratory; no support claim until its Windows build passes the Edge-equivalent CDP and workflow checks | P2 | 3 |
 | CTX-01 | Measured browser/native snapshot optimization | P1 | 3 |
 | MEM-01 | Persistent task history/semantic memory and automatic workflow learning with retention controls | P2 | Later |
 | VIS-01 | Vision fallback for inaccessible applications | P2 | Later |
@@ -571,11 +573,13 @@ flowchart LR
 
 ### Phase 3 — Browser automation and context compaction (best-effort)
 
-- Install and validate the user-managed `agent-browser` CLI in the developer test environment; verify authorized loopback CDP attachment, tab selection, pinning and browser actions in Microsoft Edge when available. Do not bundle the CLI or browser. This is the first browser install/validation gate and is independent of native Phase 1.
-- Add desktop/browser handoff and cross-adapter verification. Browser support remains best-effort and is not covered by the native reliability target.
-- Measure snapshot/context sizes before and after pruning, and track task quality impact.
+- Install and validate the user-managed `agent-browser` CLI separately. Microsoft Edge is the initial browser target; browser work remains optional and cannot block native Phase 1.
+- Require a separately launched Edge automation profile and dedicated CDP port. Verify the device's `RemoteDebuggingAllowed` policy and that the listener is loopback-only before attachment. If either condition fails or cannot be verified, disable browser tasks with an actionable explanation; native tasks remain available.
+- Never attach to the user's everyday browser profile or import/export saved authentication state. A user may manually sign in to the dedicated profile, with the understanding that its cookies and site data are visible to automation. When needed for a user-requested task, send only minimum relevant page context to the configured primary LLM; disclose this, treat page content as untrusted, and never send cookies, tokens, or credentials. Tab pinning is for target selection, not data isolation.
+- Treat Helium as an exploratory candidate only. Generic CDP documentation or Linux reports do not establish Windows support; make no support claim unless its Windows build passes the same dedicated-profile, loopback, attachment/tab, and mixed-workflow checks as Edge. Helium failure does not block Edge or native use.
+- Add desktop/browser handoff and cross-adapter verification. Browser support remains best-effort and is not covered by the native reliability target. Measure snapshot/context sizes before and after pruning, and track task quality impact.
 
-**Exit:** Complete a repeatable mixed native/browser scenario where the configured browser supports the required CDP access, with verified final outcome and no accidental tab actions; document unsupported browser setups.
+**Exit:** On the target Windows setup, pass a repeatable mixed workflow using a dedicated Edge profile: attach to CDP, select and pin the intended tab, navigate to `https://example.com`, verify the final URL/title, write the title into Notepad, and verify the note. Confirm no unrelated tab/profile is touched and that the CDP listener is loopback-only. Only then call the tested Edge setup usable, still best-effort. Helium remains exploratory until it passes the same checks; document unsupported setups.
 
 ## 17. Phase 1 Acceptance Tests
 
@@ -607,7 +611,7 @@ flowchart LR
 | AT-24 | Second mutating request during active mutation | Report busy; do not queue or execute it; require resubmission after the active task ends |
 | AT-25 | User changes target UI during execution | Pause, re-observe and revalidate before continuing; ask if safe resumption is unclear |
 | AT-26 | LLM claims a goal is complete without verifier evidence | Do not report completed; return partial/unverified or failed with reason |
-| AT-27 | Microsoft Edge CDP/browser workflow (Phase 3, when configured) | Best-effort tab identity and safe navigation/action; no claim of native reliability parity |
+| AT-27 | Phase 3: attach to dedicated Edge profile, pin intended tab, navigate to `https://example.com`, verify title/URL, enter title in Notepad | Repeatably verify both browser and Notepad outcomes; confirm loopback-only listener and no unrelated tab/profile touched; best-effort only |
 | AT-28 | Find and open a known folder or file through File Explorer | Correct target is opened; ambiguous matches trigger clarification rather than arbitrary selection |
 | AT-29 | Open a uniquely discoverable Windows app by name | Correct app launches directly without approval; readiness and target window are verified |
 | AT-30 | App name maps to multiple discovered entries | Show candidates and ask; no random selection; a unique user alias resolves future requests |
@@ -619,6 +623,10 @@ flowchart LR
 | AT-36 | First action-plan response is malformed or schema-invalid | Allow at most one correction request; revalidate the full corrected plan and rerun normal policy checks; after a second failure, stop with an actionable error and execute nothing |
 | AT-37 | Chat Completions endpoint streams an incomplete/interrupted plan | Do not execute any partial output; validate and proceed only after a complete response is received |
 | AT-38 | Configured endpoint supports Responses API but not Chat Completions | Report the unsupported endpoint contract; do not silently switch routes or send plan text for execution |
+| AT-39 | Edge debugging policy blocks CDP or listener is not verified loopback-only | Do not attach or run browser tasks; explain setup issue; native automation remains available |
+| AT-40 | Browser task targets the user's everyday profile or imported session state | Refuse that setup; require the dedicated profile; do not import/export saved auth state |
+| AT-41 | Helium candidate fails a Windows CDP or mixed-workflow check | Keep Helium exploratory/unsupported; Edge and native functionality remain unaffected |
+| AT-42 | User-requested task needs text from an authenticated dedicated browser profile | Send only minimum relevant page context to the configured LLM, treat it as untrusted, disclose the transfer, and never send cookies/tokens/credentials |
 
 **Phase 1 sign-off:** All safety tests pass; controlled Notepad suite meets the reliability target; capability-specific checks cover Calculator, File Explorer, and VLC; logs show observable step evidence; a tool version mismatch fails visibly. Edge/browser checks are best-effort and reported separately.
 
@@ -701,7 +709,7 @@ deskact/
 | Action delivered but not verified | Treat delivery and goal verification separately; avoid unsafe repeats |
 | Ambiguous windows or duplicate elements | Exact window identity, skeleton/root drill-down, stop if unresolved |
 | CLI JSON schema changes | Pin tested versions; contract tests; explicit failure on breaking changes |
-| Existing browser session not CDP-enabled | Test Microsoft Edge when available; explicit local CDP configuration; no profile assumption; browser support remains best-effort |
+| Browser profile contains personal/authenticated data or CDP is exposed beyond loopback | Require a dedicated user-launched profile, verify loopback/policy before attach, disclose minimum relevant page-context transfer to the configured LLM, never send/import/export auth state; disable browser capability if checks fail |
 | Shortcut collision or missing key release | Configurable binding and fallback separate PTT shortcut |
 | Model prompt injection from app/web data | Untrusted-content boundary and policy enforcement outside model |
 | Runaway context and token cost | Ephemeral task state, observation deltas and capped prompt assembly |
@@ -714,19 +722,20 @@ deskact/
 
 ## 20. Open Technical Decisions and Agreed Defaults
 
-**Agreed for v1.11:**
+**Agreed for v1.12:**
 
 1. **Single product:** One DeskAct desktop application/installer, not multiple user-facing CLI and tool services.
 2. **Rust layout:** Core, tool adapters, process manager and LLM client are logical modules within the Tauri Rust host; Phase 1 uses a developer-only harness.
 3. **Tools:** Do not bundle or auto-install automation tools. Require user-installed `agent-desktop` 1.1.0 for native control; `agent-browser` 0.41.2 is optional for Phase 3 browser control. Check versions before use; capability-specific missing-tool errors include README guidance.
 4. **LLM:** One user-configured endpoint/model, with Chat Completions as the required API surface. Every action plan is complete JSON subject to local schema and semantic validation; provider JSON Schema is preferred but not required. Tool calling, streaming and model discovery are optional; model ID is entered directly. Offer a synthetic connection test, allow one bounded correction attempt, then fail closed. No model subprocess or System 1 classifier.
 5. **Process lifecycle:** Avoid persistent dedicated workers initially; supervise on-demand invocations, preserve supported tool session state and clean up only DeskAct-owned subprocesses.
+6. **Browser boundary:** Phase 3 uses a user-launched dedicated Edge CDP profile with verified loopback and policy; never attach to the everyday profile or import/export saved auth. Helium is exploratory until it passes equivalent Windows checks. Browser failure never blocks native use.
 
 **Still requires empirical validation:**
 
 - Validate user-installed CLI discovery/version preflight on supported Windows. Current documentation baselines are `agent-desktop` 1.1.0 and optional `agent-browser` 0.41.2; do not bundle or auto-install either.
 - Exact repeatable workflows and evidence signals for File Explorer and VLC, in addition to the Notepad reliability suite.
-- Whether Microsoft Edge exposes authorized loopback CDP in the test environment and which session-reuse behavior is supported; validate at the Phase 3 gate, not as a prerequisite for native Phase 1.
+- Validate the agreed dedicated-profile Edge CDP setup, loopback binding, policy, tab pinning, and mixed workflow on the target Windows machine. Helium remains exploratory and needs the same Windows checks before any support claim; neither browser validation blocks native Phase 1.
 - Empirical compatibility across selected Chat Completions endpoints, model/server versions, JSON mode/schema handling, and malformed/refused/truncated response behavior; the documented contract does not guarantee model-level conformance.
 - Exact Groq model/voice versions and voice quality/latency targets; Phase 2b empirical provider checks.
 - Empirical coverage of Windows Start Menu/registered-app discovery and user-configured custom app targets on the target machine.
@@ -735,7 +744,15 @@ These investigations do not require introducing a new AI router or additional pr
 
 ## 21. Change Control
 
-### 21.1 v1.11 vs v1.10 — OpenAI-compatible LLM capability contract
+### 21.1 v1.12 vs v1.11 — Phase 3 browser support boundary
+
+- **Edge baseline:** Require a dedicated, user-launched Edge profile and verified loopback CDP/policy before attachment; never use the everyday profile or import/export saved session state.
+- **Acceptance:** Require a repeatable mixed workflow: attach/pin a dedicated tab, navigate to `https://example.com`, verify URL/title, enter the title in Notepad, and verify both outcomes without touching unrelated tabs/profiles.
+- **Helium:** Exploratory only; make no support claim until its Windows build passes Edge-equivalent CDP and workflow checks. Failure does not block Edge or native automation.
+- **Page context:** For user-requested tasks, send only minimum relevant page context to the configured primary LLM when needed; disclose the transfer, treat page content as untrusted, and never send authentication material.
+- **Evidence:** [Edge CDP research](https://github.com/Jonathan0823/deskact/blob/research/edge-cdp-feasibility/research/edge-cdp-feasibility.md); [Helium project](https://github.com/imputnet/helium-chromium); [Helium CDP issue](https://github.com/imputnet/helium/issues/2438).
+
+### 21.2 v1.11 vs v1.10 — OpenAI-compatible LLM capability contract
 
 - **Required endpoint:** Chat Completions request/response compatibility; Responses-only endpoints are not in the MVP.
 - **Action plans:** Require complete JSON and local schema/semantic validation. Provider-constrained JSON is preferred; JSON mode or prompt-constrained output may be used only with the same validation.
@@ -743,35 +760,35 @@ These investigations do not require introducing a new AI router or additional pr
 - **Setup and failure:** Provide an explicit synthetic connection test; allow at most one correction request for an invalid plan, then fail closed with an actionable error.
 - **Evidence:** [OpenAI-compatible endpoint survey](https://github.com/Jonathan0823/deskact/blob/research/openai-compatible-contract/research/openai-compatible-contract.md) documents provider variability and the need for local validation.
 
-### 21.2 v1.10 vs v1.9 — Apache-2.0 project license
+### 21.3 v1.10 vs v1.9 — Apache-2.0 project license
 
 - **Project license:** DeskAct source code and documentation are licensed under Apache-2.0, recorded in the root `LICENSE` file. Separately installed automation tools retain their upstream licenses.
 
-### 21.3 v1.9 vs v1.8 — User-installed automation tools
+### 21.4 v1.9 vs v1.8 — User-installed automation tools
 
 - **No bundled sidecars:** Users install `agent-desktop` 1.1.0 and optional `agent-browser` 0.41.2 themselves; DeskAct does not install/update tools.
 - **Capability gating:** Native control requires a compatible `agent-desktop`; missing `agent-browser` disables browser tasks only and does not block native use.
 - **Runtime setup:** Document Node.js >=24 and separate Chrome for Testing provisioning for the browser baseline; do not bypass TLS validation.
 - **Installer:** Include only DeskAct, not automation CLIs or their third-party notices; link to the upstream install and license pages.
 
-### 21.4 v1.8 vs v1.7 — Native-first Phase 0 and deferred browser gate
+### 21.5 v1.8 vs v1.7 — Native-first Phase 0 and deferred browser gate
 
 - **Native gate:** Phase 0 validates only the Windows native `agent-desktop` path. Native Phase 1 is not blocked by browser installation, CDP, or distribution issues.
 - **Browser gate:** Defer `agent-browser` installation and Edge/CDP validation to Phase 3; browser support remains best-effort and separate from the native reliability baseline.
 
-### 21.5 v1.7 vs v1.6 — App discovery and user configuration
+### 21.6 v1.7 vs v1.6 — App discovery and user configuration
 
 - **Discovery:** Resolve apps from Windows Start Menu shortcuts and registered app entries; uniquely identified apps launch directly without an extra confirmation.
 - **Custom apps:** Users manage app display names, targets, and aliases through a simple in-app settings UI; entries persist locally and are not auto-learned.
 - **Ambiguity and control:** Show candidates and ask rather than choose randomly; control discovered/configured apps only when usable accessibility controls are observed. Do not use arbitrary shell strings or blind coordinate actions.
 
-### 21.6 v1.6 vs v1.5 — Hands-free voice interaction
+### 21.7 v1.6 vs v1.5 — Hands-free voice interaction
 
 - **Voice input:** English PTT with Groq-first STT behind an adapter; successful transcripts are displayed and automatically routed without keyboard submit; local STT is deferred.
 - **Voice output:** Groq-first English TTS behind an adapter; concise clarifications, approval prompts, and outcomes are spoken; local TTS is deferred and playback is interruptible.
 - **Privacy and safety:** Separate provider-specific opt-ins for cloud STT audio and cloud TTS text; raw audio is discarded after transcription. PTT can answer prompts; consequential actions require a clear spoken `approve` after the exact action is stated.
 
-### 21.7 v1.5 vs v1.4 — Power-user navigation scope and safety gates
+### 21.8 v1.5 vs v1.4 — Power-user navigation scope and safety gates
 
 - **Audience and value:** Focus on technically comfortable power users seeking faster PC navigation and control.
 - **App coverage:** Broad, capability-dependent app ambition with a named acceptance corpus (Notepad, File Explorer, Calculator, VLC, Microsoft Edge); browser automation is best-effort and native workflows remain the reliability baseline.
@@ -779,7 +796,7 @@ These investigations do not require introducing a new AI router or additional pr
 - **Phase 0:** Explicit go/no-go before Phase 1, with Windows runtime, target identification, tool contract, and verification evidence.
 - **Reliability:** 19/20 remains specific to controlled Notepad scenarios.
 
-### 21.8 v1.4 vs v1.3 — One-app deployment and configurable LLM endpoints
+### 21.9 v1.4 vs v1.3 — One-app deployment and configurable LLM endpoints
 
 - **Deployment boundary:** One user-facing DeskAct Tauri desktop app/installer. The Rust router, orchestrator, executor, tool manager and LLM client are in-process modules rather than separately deployed services.
 - **CLI role:** Phase 1 retains a *development-only console test harness*; no standalone end-user `deskact-cli` is shipped by default.
@@ -790,14 +807,14 @@ These investigations do not require introducing a new AI router or additional pr
 - **Scope unchanged:** Accessibility-first desktop control, closed-loop verification, bounded safe recovery, hotkey/PTT UI and staged browser support.
 
 
-### 21.9 v1.3 vs v1.2 — Product naming and presentation
+### 21.10 v1.3 vs v1.2 — Product naming and presentation
 
 - **Product name:** Changed from the original internal working title to **DeskAct** throughout the document and all Mermaid diagrams.
 - **Public-facing positioning:** **DeskAct — AI Desktop Agent for Windows**. Tagline: *Tell your computer what to do. DeskAct gets it done.*
 - **Historical v1.3 workspace naming:** Proposed repository `deskact`; at that revision the workspace included `deskact-core`, `deskact-tools`, `deskact-cli`, and `deskact-hud`. **Superseded by the single-app structure in v1.4.**
 - **Architecture and MVP scope unchanged:** Rust/Tokio core, Tauri v2 HUD, deterministic routing with one primary LLM fallback, accessibility-first native automation, verified execution loop, and the phased roadmap are retained.
 
-### 21.10 v1.2 vs v1.1 — Routing simplification and operational flow
+### 21.11 v1.2 vs v1.1 — Routing simplification and operational flow
 
 - **Simplified AI routing:** Deterministic Rust command/workflow registry → **one primary LLM fallback**. No Laya, System 1 classifier, lightweight learned router or secondary LLM in MVP.
 - **Added user-facing operational flow:** PTT/text/CLI → DeskAct app/task API → deterministic router → LLM if unmatched → policy → Rust agent loop → `agent-desktop` / `agent-browser` / OS → verification → recovery / result.

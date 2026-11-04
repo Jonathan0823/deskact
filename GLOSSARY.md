@@ -24,3 +24,11 @@ _Avoid_: OpenAI API compatibility (when referring to this specific interface)
 
 **Model discovery**: An endpoint-provided listing of model identifiers available to a service. A listed identifier does not certify its capabilities.
 _Avoid_: capability discovery
+
+## Browser automation language
+
+**Dedicated automation profile**: A browser profile kept separate from a user's everyday browsing for DeskAct automation. Its cookies, authentication, and site data are visible to the attached automation; minimum relevant page context may be sent to the configured LLM for a user-requested task. It is not a security-isolation boundary.
+_Avoid_: everyday profile, isolated profile
+
+**CDP-attached browser session**: A session in which DeskAct connects to an already-running browser through the Chrome DevTools Protocol. Tab pinning can constrain the target tab, but does not isolate the session's browser data.
+_Avoid_: isolated browser session

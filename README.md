@@ -1,6 +1,6 @@
 # DeskAct
 
-DeskAct is a Windows-first, accessibility-first desktop assistant for finding, opening, and controlling supported apps. The product is in the specification and Windows validation stage; the DeskAct application is not yet released. See the [Product Requirements Document](docs/DeskAct_PRD_v1.11.md) and [Glossary](GLOSSARY.md).
+DeskAct is a Windows-first, accessibility-first desktop assistant for finding, opening, and controlling supported apps. The product is in the specification and Windows validation stage; the DeskAct application is not yet released. See the [Product Requirements Document](docs/DeskAct_PRD_v1.12.md) and [Glossary](GLOSSARY.md).
 
 ## Automation tools are installed separately
 
@@ -37,7 +37,7 @@ npm list --global agent-browser --depth=0
 agent-browser install
 ```
 
-This download is separate from npm installation. If you use an existing Microsoft Edge instance through authorized loopback CDP, follow the [CDP setup guide](https://agent-browser.dev/cdp-mode) instead. Missing or incompatible `agent-browser` disables browser tasks only; it does not block native DeskAct use. DeskAct will not install the package or browser automatically.
+This download is separate from npm installation. Planned Phase 3 browser support targets Microsoft Edge via CDP and is not yet validated. Use only a separately launched, dedicated browser profile—not your everyday profile—and verify the debugging listener is loopback-only and allowed by device policy before attaching. A dedicated profile's cookies and authentication are visible to browser automation; you may sign in to it manually, but DeskAct will not import or export saved session state. When needed for a user-requested task, only minimum relevant page context may be sent to your configured LLM endpoint; cookies, tokens, and credentials are never sent, and page content is treated as untrusted. [agent-browser CDP setup](https://agent-browser.dev/cdp-mode). Helium is exploratory and is not a supported target until the same Windows checks pass. Missing or incompatible `agent-browser` disables browser tasks only; it does not block native DeskAct use. DeskAct will not install the package or browser automatically.
 
 ### Troubleshooting
 
