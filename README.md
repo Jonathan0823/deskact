@@ -1,6 +1,6 @@
 # DeskAct
 
-DeskAct is a Windows-first, accessibility-first desktop assistant for finding, opening, and controlling supported apps. The product is in the specification and Windows validation stage; the DeskAct application is not yet released. See the [Product Requirements Document](docs/DeskAct_PRD_v1.10.md).
+DeskAct is a Windows-first, accessibility-first desktop assistant for finding, opening, and controlling supported apps. The product is in the specification and Windows validation stage; the DeskAct application is not yet released. See the [Product Requirements Document](docs/DeskAct_PRD_v1.11.md) and [Glossary](GLOSSARY.md).
 
 ## Automation tools are installed separately
 

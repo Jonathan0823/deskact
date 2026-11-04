@@ -1,0 +1,26 @@
+# DeskAct
+
+This glossary defines the product language for DeskAct's user requests, model-produced plans, and configurable LLM endpoints.
+
+## LLM planning and API language
+
+**Primary model**: The single user-configured LLM endpoint and model used to interpret unmatched requests and propose action plans.
+_Avoid_: router model, secondary model
+
+**Action plan**: A structured proposal describing candidate actions and expected outcomes for a user request. It is not authorization to execute those actions.
+_Avoid_: executable command, tool call (when referring to the whole plan)
+
+**Structured output**: A response format constrained by an endpoint or model to follow a declared structure or schema. Conformance to that format does not establish that the content is semantically correct or safe.
+_Avoid_: validated plan
+
+**Model-proposed tool call**: A model's request to invoke a named operation with arguments. It is a proposal, not execution or permission; DeskAct's policy remains authoritative.
+_Avoid_: tool execution, authorization
+
+**OpenAI-compatible endpoint**: An API endpoint that implements some OpenAI-shaped request and response conventions. The label alone does not imply support for every endpoint, parameter, or feature.
+_Avoid_: fully OpenAI-compatible (unless the exact feature set is specified)
+
+**Chat Completions interface**: The OpenAI-style chat request and response shape DeskAct requires from an MVP endpoint. It does not imply support for other OpenAI API surfaces or optional capabilities.
+_Avoid_: OpenAI API compatibility (when referring to this specific interface)
+
+**Model discovery**: An endpoint-provided listing of model identifiers available to a service. A listed identifier does not certify its capabilities.
+_Avoid_: capability discovery

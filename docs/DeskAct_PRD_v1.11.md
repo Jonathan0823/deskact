@@ -7,9 +7,9 @@
 **GitHub repository (proposed):** `deskact`  
 **Repository description:** An open-source AI desktop agent for Windows. Control native apps, browsers, and system tasks with natural language or voice. Built with Rust + Tauri.
 
-**Version:** 1.10 — Apache-2.0 project license
+**Version:** 1.11 — OpenAI-compatible LLM capability contract
 **Date:** 4 November 2026  
-**Status:** Apache-2.0 project license and no-bundled-sidecar distribution recorded / native Phase 0 validation pending
+**Status:** LLM capability contract, Apache-2.0 project license, and no-bundled-sidecar distribution recorded / native Phase 0 validation pending
 **Initial platform:** Windows 10/11; other desktop platforms are out of MVP scope  
 **Product form:** **One user-facing DeskAct application and installer.** Modular Rust orchestrator in the Tauri host process; a development-only terminal harness in Phase 1; Tauri text HUD enabled in Phase 2. Users install automation CLIs separately; DeskAct does not bundle or auto-install them.
 
@@ -204,7 +204,7 @@ flowchart TB
 | Web automation | User-installed, optional `agent-browser` CLI (best-effort browser capability, staged after native baseline), invoking reusable tool-managed session/daemon only when needed |
 | Desktop packaging (Phase 2) | **One Tauri v2 application/installer**; React/Tailwind WebView; automation sidecars are not included |
 | Voice (Phase 2b) | English-only PTT; Groq-first STT/TTS behind adapters, with local alternatives deferred; explicit separate provider opt-ins; raw audio discarded after transcription |
-| LLM integration | Dynamic OpenAI-compatible base URL, model ID, API key, supported request options; client sends async HTTP requests, no LLM child process |
+| LLM integration | Configurable Chat Completions endpoint/model/key; complete JSON action plans validated locally; provider schema enforcement optional; no LLM child process |
 | Persistence | User-managed app catalog/aliases persist in local app settings; no persistent task memory required for MVP; optional bounded diagnostic logs |
 
 **Integration rule:** Require the documented baseline tool versions (`agent-desktop` 1.1.0; `agent-browser` 0.41.2 when browser capability is enabled) and JSON contract compatibility. Preflight tool availability/version; unknown fields may be tolerated, but incompatible envelope changes must fail visibly rather than silently misparse.
@@ -263,7 +263,10 @@ max_tokens / temperature / timeout: configurable within validated limits
 ```
 
 - Support URL/model/key configuration rather than hard-coded OpenAI vendor names. Apply HTTPS by default for remote connections; explicit loopback HTTP can be allowed for local providers.
-- Probe relevant compatibility (e.g., `/models` where available, chat completions, structured JSON response, streaming if enabled) and show specific errors for unsupported capabilities. Do not assume every OpenAI-compatible provider implements identical tool-calling semantics.
+- **Required API surface:** The configured base URL and model must support Chat Completions-style requests and responses. Responses-only endpoints are unsupported in the MVP.
+- **Action-plan contract:** Every action plan must be a complete JSON response accepted by DeskAct's local schema and semantic validation before policy evaluation. Use provider-level JSON Schema/structured-output enforcement when supported; otherwise use JSON mode or prompt-constrained JSON, with the same local validation. Natural-language responses may answer or clarify, but are never interpreted as executable plans.
+- **Optional features:** API tool/function calling, streaming, and `/models` discovery are not required. Rust interprets only the known action-plan format and remains the sole executor/policy authority. Users configure the model ID directly; a model listing is only a convenience and does not certify model capabilities. If plan streaming is used, buffer until the response is complete before validation or execution.
+- **Setup and failure behavior:** Offer an explicit connection test that sends a synthetic, non-sensitive request to the configured endpoint/model; it executes no actions and is only a smoke test. For malformed/schema-invalid plans, permit at most one bounded correction request, then fail closed with a specific actionable error. Never silently execute unstructured text, an incomplete stream, or a partial plan. Do not log credentials or private prompts.
 - Keep secrets in OS-protected storage or an appropriately secured backend credential store. Do not print authorization headers, secrets or private prompts to default logs.
 - For the MVP, DeskAct uses **one active primary endpoint/model** at a time, configurable by the user. No secondary routing model or local model-server management is included.
 
@@ -292,7 +295,7 @@ flowchart TD
 
 **ROUTE-02 — Unhandled behavior:** If no supported match exists, call the primary LLM. It may return a structured task plan, request clarification, or produce a conversational response with no tools. The absence of a match never grants permission to run raw shell commands.
 
-**ROUTE-03 — Dynamic OpenAI-compatible adapter:** Phase 1 uses one provider interface with **user-configurable API base URL, model ID, optional API key, and timeout/parameter settings**. Power-user setup of this endpoint and credentials is acceptable for the first usable release. The same adapter connects to remote API providers or independently started local model servers implementing relevant OpenAI-compatible endpoints. The UI must never receive stored credentials. Capability checks cover structured JSON plans, tool calling when needed, and optional streaming: partial API compatibility must fail clearly or use an explicitly supported fallback. Invalid structured responses are rejected or repair-requested within a bounded budget.
+**ROUTE-03 — Dynamic OpenAI-compatible adapter:** Phase 1 uses one provider interface with **user-configurable API base URL, model ID, optional API key, and timeout/parameter settings**. Power-user setup of this endpoint and credentials is acceptable for the first usable release. The configured endpoint must implement the Chat Completions request/response shape; Responses-only endpoints are outside MVP scope. The same adapter connects to remote providers or independently started local model servers. The UI must never receive stored credentials. Every action plan must be complete JSON that passes local schema and semantic validation. Use provider-level structured-output enforcement when available; otherwise use JSON mode or prompt-constrained JSON with the same validation. API tool/function calling, streaming, and model discovery are optional; a configured model ID is sufficient. Offer a user-initiated synthetic connection test that executes no actions and is not a capability guarantee. Permit at most one bounded correction request for a malformed or schema-invalid plan; validate any corrected response from scratch, then fail closed with a specific error if it remains invalid. Never execute natural-language text or partial streamed output as a plan.
 
 **ROUTE-04 — Workflow independence:** A validated registered workflow may have multiple steps and still bypass LLM planning. However, each step remains subject to policy, observation and verification.
 
@@ -487,7 +490,7 @@ Every task outcome should include the requested objective, achieved postconditio
 | OS-01 | Allowlisted direct system commands with readiness checks | P0 | 1 |
 | PROC-01 | On-demand tool subprocess supervision, session-aware reuse, timeouts and owned-child cleanup | P0 | 1 |
 | DIST-01 | One DeskAct app/installer with no automation sidecars; users install/version-check CLIs separately; capability-specific missing-tool guidance | P0 | 2 |
-| LLM-01 | Secure backend API credentials and compatibility/error handling for remote and local endpoints | P0 | 1 |
+| LLM-01 | Secure credentials; Chat Completions baseline; locally validated JSON action plans; explicit synthetic connection test; optional provider schema enforcement, tool calling, streaming, and model discovery | P0 | 1 |
 | OBS-01 | Structured event trace and honest outcome reporting | P0 | 1 |
 | HUD-01–08 | Tauri overlay, shortcut, text UX, hands-free PTT, speech output, approvals and streaming status | P1 | 2 |
 | BRW-01–06 | Best-effort browser CDP connection, tab handling and web handoff; no native reliability target | P1 | 3 |
@@ -541,7 +544,7 @@ flowchart LR
 
 - Set up a **single Rust application crate** under `src-tauri` with modular `core/`, `tools/`, `llm/` and `commands/`; use a dev-only `examples/` or test harness while the HUD is not yet built.
 - Implement Windows app discovery for Start Menu shortcuts/registered app entries, a deterministic app catalog, a user-configurable local app-entry store exposed to the dev harness, and registered workflow matching; retain direct **single primary LLM fallback** with no System 1/Laya integration.
-- Implement one OpenAI-compatible primary LLM connector with configurable base URL/model/key, async requests, compatibility checks, structured plan validation, minimal planner and independent Rust risk policy.
+- Implement one primary LLM connector requiring Chat Completions compatibility, with configurable base URL/model/key, async requests, explicit synthetic connection test, locally validated JSON plans, one bounded correction request, and independent Rust risk policy. Treat provider JSON Schema, tool calling, streaming, and model discovery as optional.
 - Implement typed tool adapters, on-demand subprocess manager, process timeout/cancellation handling and logical session reuse where supported.
 - Implement readiness poller, snapshot observation, scoped refs, verification and safe recovery.
 - Add bounded in-memory task context, event trace and test fixtures for structured tool responses.
@@ -598,7 +601,7 @@ flowchart LR
 | AT-18 | Remote endpoint and invalid credentials | Clear auth/network failure; secrets never appear in frontend/logs |
 | AT-19 | Native tool child times out or exits nonzero | Controlled timeout, error reporting, and no accidental termination of user apps |
 | AT-20 | Two native actions in succession | Sidecar commands invoked on demand and session refs handled safely |
-| AT-21 | Unsupported model endpoint capabilities | Explicit compatibility error / supported fallback rather than silent plan corruption |
+| AT-21 | Endpoint lacks provider-level JSON Schema enforcement | Use JSON mode or prompt-constrained output and accept only a complete plan that passes the same local validation; never downgrade to executing prose |
 | AT-22 | Consequential action approval, then change target or parameters | Original approval is invalidated; changed action requires a new scoped approval |
 | AT-23 | Ambiguous target or materially uncertain consequence | Stop for clarification/approval; model confidence alone does not authorize action |
 | AT-24 | Second mutating request during active mutation | Report busy; do not queue or execute it; require resubmission after the active task ends |
@@ -611,6 +614,11 @@ flowchart LR
 | AT-31 | Launched app exposes no usable accessibility controls | Report limitation; do not use blind coordinate clicks or arbitrary commands |
 | AT-32 | `agent-desktop` missing or incompatible | Do not execute native tasks; show the exact install/upgrade instructions and required version |
 | AT-33 | `agent-browser` missing/incompatible during a native task | Native task proceeds normally; browser capability stays unavailable and no automatic install is attempted |
+| AT-34 | User runs the LLM connection test | Send only a synthetic, non-sensitive request to the configured Chat Completions endpoint/model; execute no actions; report connectivity/auth/basic response and that the check is not a capability guarantee |
+| AT-35 | Configured endpoint has no `/models` route or tool-calling support | Explicit model ID and locally validated JSON plan work without either optional feature |
+| AT-36 | First action-plan response is malformed or schema-invalid | Allow at most one correction request; revalidate the full corrected plan and rerun normal policy checks; after a second failure, stop with an actionable error and execute nothing |
+| AT-37 | Chat Completions endpoint streams an incomplete/interrupted plan | Do not execute any partial output; validate and proceed only after a complete response is received |
+| AT-38 | Configured endpoint supports Responses API but not Chat Completions | Report the unsupported endpoint contract; do not silently switch routes or send plan text for execution |
 
 **Phase 1 sign-off:** All safety tests pass; controlled Notepad suite meets the reliability target; capability-specific checks cover Calculator, File Explorer, and VLC; logs show observable step evidence; a tool version mismatch fails visibly. Edge/browser checks are best-effort and reported separately.
 
@@ -701,17 +709,17 @@ deskact/
 | User-installed CLI missing, outdated, or absent from PATH | Preflight each capability, report the required version and README install command; no silent install/update |
 | Node/runtime or browser download prerequisites | Document Node >=24 for the browser baseline and separate Chrome for Testing provisioning; never bypass TLS validation |
 | Tool-managed browser daemon persists after CLI exit | Track session ownership, reuse supported daemon, document cleanup without killing unrelated user sessions |
-| User-selected local/remote LLM endpoint incompatible | Probe JSON/streaming/tool features, validate plans, show precise error messages |
+| User-selected local/remote LLM endpoint incompatible | Explicit synthetic Chat Completions connection test; validate every complete plan locally; optional features are not prerequisites; fail closed with precise errors |
 | Credential disclosure across Tauri IPC | Store secrets on backend side, restrict IPC, redact logs and never emit authorization headers |
 
 ## 20. Open Technical Decisions and Agreed Defaults
 
-**Agreed for v1.9:**
+**Agreed for v1.11:**
 
 1. **Single product:** One DeskAct desktop application/installer, not multiple user-facing CLI and tool services.
 2. **Rust layout:** Core, tool adapters, process manager and LLM client are logical modules within the Tauri Rust host; Phase 1 uses a developer-only harness.
 3. **Tools:** Do not bundle or auto-install automation tools. Require user-installed `agent-desktop` 1.1.0 for native control; `agent-browser` 0.41.2 is optional for Phase 3 browser control. Check versions before use; capability-specific missing-tool errors include README guidance.
-4. **LLM:** User-configurable OpenAI-compatible endpoint URL, model ID and credentials; support external cloud services and separately managed local endpoints. No model subprocess or System 1 classifier.
+4. **LLM:** One user-configured endpoint/model, with Chat Completions as the required API surface. Every action plan is complete JSON subject to local schema and semantic validation; provider JSON Schema is preferred but not required. Tool calling, streaming and model discovery are optional; model ID is entered directly. Offer a synthetic connection test, allow one bounded correction attempt, then fail closed. No model subprocess or System 1 classifier.
 5. **Process lifecycle:** Avoid persistent dedicated workers initially; supervise on-demand invocations, preserve supported tool session state and clean up only DeskAct-owned subprocesses.
 
 **Still requires empirical validation:**
@@ -719,7 +727,7 @@ deskact/
 - Validate user-installed CLI discovery/version preflight on supported Windows. Current documentation baselines are `agent-desktop` 1.1.0 and optional `agent-browser` 0.41.2; do not bundle or auto-install either.
 - Exact repeatable workflows and evidence signals for File Explorer and VLC, in addition to the Notepad reliability suite.
 - Whether Microsoft Edge exposes authorized loopback CDP in the test environment and which session-reuse behavior is supported; validate at the Phase 3 gate, not as a prerequisite for native Phase 1.
-- Which OpenAI-compatible API features are mandatory vs optional, particularly structured output/tool calls and streaming.
+- Empirical compatibility across selected Chat Completions endpoints, model/server versions, JSON mode/schema handling, and malformed/refused/truncated response behavior; the documented contract does not guarantee model-level conformance.
 - Exact Groq model/voice versions and voice quality/latency targets; Phase 2b empirical provider checks.
 - Empirical coverage of Windows Start Menu/registered-app discovery and user-configured custom app targets on the target machine.
 
@@ -727,35 +735,43 @@ These investigations do not require introducing a new AI router or additional pr
 
 ## 21. Change Control
 
-### 21.1 v1.10 vs v1.9 — Apache-2.0 project license
+### 21.1 v1.11 vs v1.10 — OpenAI-compatible LLM capability contract
+
+- **Required endpoint:** Chat Completions request/response compatibility; Responses-only endpoints are not in the MVP.
+- **Action plans:** Require complete JSON and local schema/semantic validation. Provider-constrained JSON is preferred; JSON mode or prompt-constrained output may be used only with the same validation.
+- **Optional features:** Tool/function calling, streaming, and `/models` discovery are not required. Users configure the model ID directly; never execute incomplete streamed plans.
+- **Setup and failure:** Provide an explicit synthetic connection test; allow at most one correction request for an invalid plan, then fail closed with an actionable error.
+- **Evidence:** [OpenAI-compatible endpoint survey](https://github.com/Jonathan0823/deskact/blob/research/openai-compatible-contract/research/openai-compatible-contract.md) documents provider variability and the need for local validation.
+
+### 21.2 v1.10 vs v1.9 — Apache-2.0 project license
 
 - **Project license:** DeskAct source code and documentation are licensed under Apache-2.0, recorded in the root `LICENSE` file. Separately installed automation tools retain their upstream licenses.
 
-### 21.2 v1.9 vs v1.8 — User-installed automation tools
+### 21.3 v1.9 vs v1.8 — User-installed automation tools
 
 - **No bundled sidecars:** Users install `agent-desktop` 1.1.0 and optional `agent-browser` 0.41.2 themselves; DeskAct does not install/update tools.
 - **Capability gating:** Native control requires a compatible `agent-desktop`; missing `agent-browser` disables browser tasks only and does not block native use.
 - **Runtime setup:** Document Node.js >=24 and separate Chrome for Testing provisioning for the browser baseline; do not bypass TLS validation.
 - **Installer:** Include only DeskAct, not automation CLIs or their third-party notices; link to the upstream install and license pages.
 
-### 21.3 v1.8 vs v1.7 — Native-first Phase 0 and deferred browser gate
+### 21.4 v1.8 vs v1.7 — Native-first Phase 0 and deferred browser gate
 
 - **Native gate:** Phase 0 validates only the Windows native `agent-desktop` path. Native Phase 1 is not blocked by browser installation, CDP, or distribution issues.
 - **Browser gate:** Defer `agent-browser` installation and Edge/CDP validation to Phase 3; browser support remains best-effort and separate from the native reliability baseline.
 
-### 21.4 v1.7 vs v1.6 — App discovery and user configuration
+### 21.5 v1.7 vs v1.6 — App discovery and user configuration
 
 - **Discovery:** Resolve apps from Windows Start Menu shortcuts and registered app entries; uniquely identified apps launch directly without an extra confirmation.
 - **Custom apps:** Users manage app display names, targets, and aliases through a simple in-app settings UI; entries persist locally and are not auto-learned.
 - **Ambiguity and control:** Show candidates and ask rather than choose randomly; control discovered/configured apps only when usable accessibility controls are observed. Do not use arbitrary shell strings or blind coordinate actions.
 
-### 21.5 v1.6 vs v1.5 — Hands-free voice interaction
+### 21.6 v1.6 vs v1.5 — Hands-free voice interaction
 
 - **Voice input:** English PTT with Groq-first STT behind an adapter; successful transcripts are displayed and automatically routed without keyboard submit; local STT is deferred.
 - **Voice output:** Groq-first English TTS behind an adapter; concise clarifications, approval prompts, and outcomes are spoken; local TTS is deferred and playback is interruptible.
 - **Privacy and safety:** Separate provider-specific opt-ins for cloud STT audio and cloud TTS text; raw audio is discarded after transcription. PTT can answer prompts; consequential actions require a clear spoken `approve` after the exact action is stated.
 
-### 21.6 v1.5 vs v1.4 — Power-user navigation scope and safety gates
+### 21.7 v1.5 vs v1.4 — Power-user navigation scope and safety gates
 
 - **Audience and value:** Focus on technically comfortable power users seeking faster PC navigation and control.
 - **App coverage:** Broad, capability-dependent app ambition with a named acceptance corpus (Notepad, File Explorer, Calculator, VLC, Microsoft Edge); browser automation is best-effort and native workflows remain the reliability baseline.
@@ -763,7 +779,7 @@ These investigations do not require introducing a new AI router or additional pr
 - **Phase 0:** Explicit go/no-go before Phase 1, with Windows runtime, target identification, tool contract, and verification evidence.
 - **Reliability:** 19/20 remains specific to controlled Notepad scenarios.
 
-### 21.7 v1.4 vs v1.3 — One-app deployment and configurable LLM endpoints
+### 21.8 v1.4 vs v1.3 — One-app deployment and configurable LLM endpoints
 
 - **Deployment boundary:** One user-facing DeskAct Tauri desktop app/installer. The Rust router, orchestrator, executor, tool manager and LLM client are in-process modules rather than separately deployed services.
 - **CLI role:** Phase 1 retains a *development-only console test harness*; no standalone end-user `deskact-cli` is shipped by default.
@@ -774,14 +790,14 @@ These investigations do not require introducing a new AI router or additional pr
 - **Scope unchanged:** Accessibility-first desktop control, closed-loop verification, bounded safe recovery, hotkey/PTT UI and staged browser support.
 
 
-### 21.8 v1.3 vs v1.2 — Product naming and presentation
+### 21.9 v1.3 vs v1.2 — Product naming and presentation
 
 - **Product name:** Changed from the original internal working title to **DeskAct** throughout the document and all Mermaid diagrams.
 - **Public-facing positioning:** **DeskAct — AI Desktop Agent for Windows**. Tagline: *Tell your computer what to do. DeskAct gets it done.*
 - **Historical v1.3 workspace naming:** Proposed repository `deskact`; at that revision the workspace included `deskact-core`, `deskact-tools`, `deskact-cli`, and `deskact-hud`. **Superseded by the single-app structure in v1.4.**
 - **Architecture and MVP scope unchanged:** Rust/Tokio core, Tauri v2 HUD, deterministic routing with one primary LLM fallback, accessibility-first native automation, verified execution loop, and the phased roadmap are retained.
 
-### 21.9 v1.2 vs v1.1 — Routing simplification and operational flow
+### 21.10 v1.2 vs v1.1 — Routing simplification and operational flow
 
 - **Simplified AI routing:** Deterministic Rust command/workflow registry → **one primary LLM fallback**. No Laya, System 1 classifier, lightweight learned router or secondary LLM in MVP.
 - **Added user-facing operational flow:** PTT/text/CLI → DeskAct app/task API → deterministic router → LLM if unmatched → policy → Rust agent loop → `agent-desktop` / `agent-browser` / OS → verification → recovery / result.
