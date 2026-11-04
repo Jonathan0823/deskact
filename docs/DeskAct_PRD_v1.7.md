@@ -7,9 +7,9 @@
 **GitHub repository (proposed):** `deskact`  
 **Repository description:** An open-source AI desktop agent for Windows. Control native apps, browsers, and system tasks with natural language or voice. Built with Rust + Tauri.
 
-**Version:** 1.6 — Hands-free voice interaction and explicit safety gates  
+**Version:** 1.7 — User-configurable app discovery and hands-free control
 **Date:** 4 November 2026  
-**Status:** v1.6 product scope and voice interaction decisions recorded / Phase 0 go-no-go validation pending  
+**Status:** v1.7 product scope and app discovery decisions recorded / Phase 0 go-no-go validation pending
 **Initial platform:** Windows 10/11; other desktop platforms are out of MVP scope  
 **Product form:** **One user-facing DeskAct application and installer.** Modular Rust orchestrator in the Tauri host process; a development-only terminal harness in Phase 1; Tauri text HUD enabled in Phase 2. External automation tools are bundled where license/dependency audits permit.
 
@@ -113,8 +113,9 @@ flowchart TD
 
 | Request | Route | Expected execution |
 |---|---|---|
-| “Open Calculator” | Known app alias | OS executor → wait for target window → verify |
+| “Open Calculator” | Unique Windows app discovery/alias match | OS executor → launch directly → wait for target window → verify |
 | “Open Downloads” | Known folder alias | Validated OS action → verify location opened |
+| “Open my editor” (multiple matching apps) | Ambiguous discovery result | Show candidate apps and ask; optionally save a unique user alias; never choose randomly |
 | “Open Notepad and insert this exact text” | Registered workflow if supported, otherwise LLM plan | OS + `agent-desktop` → verify content |
 | “Open VLC and play the sample video” | Main LLM unless a tested workflow is registered | `agent-desktop` observe/act/verify loop; verify playback state where observable |
 | “Summarize what this document says” | Main LLM | Read approved content → respond; no desktop mutation required |
@@ -204,7 +205,7 @@ flowchart TB
 | Desktop packaging (Phase 2) | **One Tauri v2 application/installer**; React/Tailwind WebView; sidecar binaries included with versioned third-party notices |
 | Voice (Phase 2b) | English-only PTT; Groq-first STT/TTS behind adapters, with local alternatives deferred; explicit separate provider opt-ins; raw audio discarded after transcription |
 | LLM integration | Dynamic OpenAI-compatible base URL, model ID, API key, supported request options; client sends async HTTP requests, no LLM child process |
-| Persistence | None required for MVP task memory; optional bounded diagnostic logs |
+| Persistence | User-managed app catalog/aliases persist in local app settings; no persistent task memory required for MVP; optional bounded diagnostic logs |
 
 **Integration rule:** Pin tested tool versions / JSON contract versions. Unknown fields may be tolerated, but incompatible envelope changes must fail visibly rather than silently misparse.
 
@@ -347,7 +348,7 @@ This context is ephemeral in Phase 1; long histories and full accessibility tree
 
 ## 9. Desktop Accessibility Adapter Requirements
 
-**DSK-01 — App discovery and launch:** Use deterministic launch for registered apps; poll process/window availability with timeout and backoff. Do not assume process creation equals GUI readiness.
+**DSK-01 — App discovery and launch:** Discover applications from Windows Start Menu shortcuts and registered app entries, then resolve names/aliases deterministically. A clear, unique match to a discovered or user-configured app launches directly without an extra approval prompt. If the match is ambiguous or materially uncertain, present candidates and ask the user. Poll process/window availability with timeout and backoff; do not assume process creation equals GUI readiness. Never pass an LLM-generated command string to a shell.
 
 **DSK-02 — Window identity:** Record the exact application/window identity. If several windows match, choose by stable evidence or request disambiguation; never act on a randomly selected window.
 
@@ -362,6 +363,10 @@ This context is ephemeral in Phase 1; long histories and full accessibility tree
 **DSK-07 — Structured response parsing:** Parse `ok`, `command`, `version`, `data` / `error`, and relevant `disposition` fields. Keep raw stdout/stderr redacted and bounded for diagnostics.
 
 **DSK-08 — Post-action verification:** Interpret `delivered_verified` only as proof of the adapter’s *named* postcondition; verify the application-level goal separately where feasible.
+
+**DSK-09 — User-managed app entries:** Provide a simple in-app settings UI to add/edit an app display name, executable/app target, and user-defined aliases. Persist these settings locally; do not infer or learn aliases automatically. Reject conflicting aliases or present all matching candidates and ask the user which app they meant; never select randomly. A custom executable must be explicitly configured and launched directly with validated arguments, not through a shell.
+
+**DSK-10 — Accessibility-gated control:** After launching any discovered or configured app, attempt UI control only when the target and usable accessibility controls are observed. If controls are inaccessible or materially ambiguous, explain the limitation or ask for clarification; do not fall back to blind coordinate clicks or arbitrary commands.
 
 ### 9.1 Error recovery decision flow
 
@@ -476,7 +481,8 @@ Every task outcome should include the requested objective, achieved postconditio
 | CORE-06 | Risk classification and action-specific approval gate; approvals invalidated when action details change | P0 | 1 |
 | CORE-07 | Serialize mutating tasks; pause, re-observe and revalidate after possible user/UI interference | P0 | 1 |
 | VER-01 | DeskAct-owned evidence rules determine completion independently of LLM claims | P0 | 1 |
-| DSK-01–08 | Native app lifecycle, snapshots, scoped refs, parsed errors, verification | P0 | 1 |
+| DSK-01–08 | Native app discovery/launch, lifecycle, snapshots, scoped refs, parsed errors and verification | P0 | 1 |
+| DSK-09–10 | User-managed local app entries/aliases in settings and accessibility-gated control | P0 | 1–2a |
 | REC-01 | Disposition-aware recovery with bounded safe retries | P0 | 1 |
 | OS-01 | Allowlisted direct system commands with readiness checks | P0 | 1 |
 | PROC-01 | On-demand tool subprocess supervision, session-aware reuse, timeouts and owned-child cleanup | P0 | 1 |
@@ -486,7 +492,7 @@ Every task outcome should include the requested objective, achieved postconditio
 | HUD-01–08 | Tauri overlay, shortcut, text UX, hands-free PTT, speech output, approvals and streaming status | P1 | 2 |
 | BRW-01–06 | Best-effort browser CDP connection, tab handling and web handoff; no native reliability target | P1 | 3 |
 | CTX-01 | Measured browser/native snapshot optimization | P1 | 3 |
-| MEM-01 | Persistent SQLite alias/preferences memory with retention controls | P2 | Later |
+| MEM-01 | Persistent task history/semantic memory and automatic workflow learning with retention controls | P2 | Later |
 | VIS-01 | Vision fallback for inaccessible applications | P2 | Later |
 | VOI-01 | Wake-word activation | P3 | Later |
 
@@ -534,7 +540,7 @@ flowchart LR
 ### Phase 1 — Rust orchestrator + native workflows (**current priority**)
 
 - Set up a **single Rust application crate** under `src-tauri` with modular `core/`, `tools/`, `llm/` and `commands/`; use a dev-only `examples/` or test harness while the HUD is not yet built.
-- Implement deterministic alias/workflow registry and direct **single primary LLM fallback**; no System 1/Laya integration.
+- Implement Windows app discovery for Start Menu shortcuts/registered app entries, a deterministic app catalog, a user-configurable local app-entry store exposed to the dev harness, and registered workflow matching; retain direct **single primary LLM fallback** with no System 1/Laya integration.
 - Implement one OpenAI-compatible primary LLM connector with configurable base URL/model/key, async requests, compatibility checks, structured plan validation, minimal planner and independent Rust risk policy.
 - Implement typed tool adapters, on-demand subprocess manager, process timeout/cancellation handling and logical session reuse where supported.
 - Implement readiness poller, snapshot observation, scoped refs, verification and safe recovery.
@@ -545,9 +551,10 @@ flowchart LR
 ### Phase 2a — Text-first Tauri HUD
 
 - Build overlay, shortcut handling, focus restoration, task progress and cancel control.
+- Add a simple settings UI for user-managed app names, executable/app targets, and unique aliases backed by the Phase 1 local app catalog.
 - Expose the already-tested core through narrow typed Tauri IPC commands and asynchronous events; bundle tested `agent-desktop` sidecar and license notices as part of one installer.
 
-**Exit:** Invoke by shortcut, execute a harness-proven workflow and observe status without taking focus permanently. Confirm the installer ships a single user-facing DeskAct application and all required, licensed sidecars.
+**Exit:** Invoke by shortcut, execute a harness-proven workflow and observe status without taking focus permanently. Confirm custom app settings persist and resolve aliases safely. Confirm the installer ships a single user-facing DeskAct application and all required, licensed sidecars.
 
 ### Phase 2b — Hands-free push-to-talk and speech
 
@@ -599,8 +606,18 @@ flowchart LR
 | AT-26 | LLM claims a goal is complete without verifier evidence | Do not report completed; return partial/unverified or failed with reason |
 | AT-27 | Microsoft Edge CDP/browser workflow (Phase 3, when configured) | Best-effort tab identity and safe navigation/action; no claim of native reliability parity |
 | AT-28 | Find and open a known folder or file through File Explorer | Correct target is opened; ambiguous matches trigger clarification rather than arbitrary selection |
+| AT-29 | Open a uniquely discoverable Windows app by name | Correct app launches directly without approval; readiness and target window are verified |
+| AT-30 | App name maps to multiple discovered entries | Show candidates and ask; no random selection; a unique user alias resolves future requests |
+| AT-31 | Launched app exposes no usable accessibility controls | Report limitation; do not use blind coordinate clicks or arbitrary commands |
 
 **Phase 1 sign-off:** All safety tests pass; controlled Notepad suite meets the reliability target; capability-specific checks cover Calculator, File Explorer, and VLC; logs show observable step evidence; a tool version mismatch fails visibly. Edge/browser checks are best-effort and reported separately.
+
+### Phase 2a App Settings Acceptance Tests
+
+| Test | Input / injected condition | Required result |
+|---|---|---|
+| APPA-01 | Add/edit a custom app entry and alias in settings | Entry persists locally and launches directly via validated executable invocation; no shell interpolation |
+| APPA-02 | Add an alias that conflicts with an existing entry | Conflict is rejected or candidates are shown; no arbitrary alias winner is selected |
 
 ### Phase 2b Voice Acceptance Tests
 
@@ -688,7 +705,7 @@ deskact/
 
 ## 20. Open Technical Decisions and Agreed Defaults
 
-**Agreed for v1.6:**
+**Agreed for v1.7:**
 
 1. **Single product:** One DeskAct desktop application/installer, not multiple user-facing CLI and tool services.
 2. **Rust layout:** Core, tool adapters, process manager and LLM client are logical modules within the Tauri Rust host; Phase 1 uses a developer-only harness.
@@ -703,19 +720,25 @@ deskact/
 - Whether Microsoft Edge exposes authorized loopback CDP in the test environment and which session-reuse behavior is supported.
 - Which OpenAI-compatible API features are mandatory vs optional, particularly structured output/tool calls and streaming.
 - Exact Groq model/voice versions and voice quality/latency targets; Phase 2b empirical provider checks.
-- Approved executable aliases and any remaining confirmation policy details.
+- Empirical coverage of Windows Start Menu/registered-app discovery and user-configured custom app targets on the target machine.
 
 These investigations do not require introducing a new AI router or additional production services.
 
 ## 21. Change Control
 
-### 21.1 v1.6 vs v1.5 — Hands-free voice interaction
+### 21.1 v1.7 vs v1.6 — App discovery and user configuration
+
+- **Discovery:** Resolve apps from Windows Start Menu shortcuts and registered app entries; uniquely identified apps launch directly without an extra confirmation.
+- **Custom apps:** Users manage app display names, targets, and aliases through a simple in-app settings UI; entries persist locally and are not auto-learned.
+- **Ambiguity and control:** Show candidates and ask rather than choose randomly; control discovered/configured apps only when usable accessibility controls are observed. Do not use arbitrary shell strings or blind coordinate actions.
+
+### 21.2 v1.6 vs v1.5 — Hands-free voice interaction
 
 - **Voice input:** English PTT with Groq-first STT behind an adapter; successful transcripts are displayed and automatically routed without keyboard submit; local STT is deferred.
 - **Voice output:** Groq-first English TTS behind an adapter; concise clarifications, approval prompts, and outcomes are spoken; local TTS is deferred and playback is interruptible.
 - **Privacy and safety:** Separate provider-specific opt-ins for cloud STT audio and cloud TTS text; raw audio is discarded after transcription. PTT can answer prompts; consequential actions require a clear spoken `approve` after the exact action is stated.
 
-### 21.2 v1.5 vs v1.4 — Power-user navigation scope and safety gates
+### 21.3 v1.5 vs v1.4 — Power-user navigation scope and safety gates
 
 - **Audience and value:** Focus on technically comfortable power users seeking faster PC navigation and control.
 - **App coverage:** Broad, capability-dependent app ambition with a named acceptance corpus (Notepad, File Explorer, Calculator, VLC, Microsoft Edge); browser automation is best-effort and native workflows remain the reliability baseline.
@@ -723,7 +746,7 @@ These investigations do not require introducing a new AI router or additional pr
 - **Phase 0:** Explicit go/no-go before Phase 1, with Windows runtime, target identification, tool contract, and verification evidence.
 - **Reliability:** 19/20 remains specific to controlled Notepad scenarios.
 
-### 21.3 v1.4 vs v1.3 — One-app deployment and configurable LLM endpoints
+### 21.4 v1.4 vs v1.3 — One-app deployment and configurable LLM endpoints
 
 - **Deployment boundary:** One user-facing DeskAct Tauri desktop app/installer. The Rust router, orchestrator, executor, tool manager and LLM client are in-process modules rather than separately deployed services.
 - **CLI role:** Phase 1 retains a *development-only console test harness*; no standalone end-user `deskact-cli` is shipped by default.
@@ -734,14 +757,14 @@ These investigations do not require introducing a new AI router or additional pr
 - **Scope unchanged:** Accessibility-first desktop control, closed-loop verification, bounded safe recovery, hotkey/PTT UI and staged browser support.
 
 
-### 21.4 v1.3 vs v1.2 — Product naming and presentation
+### 21.5 v1.3 vs v1.2 — Product naming and presentation
 
 - **Product name:** Changed from the original internal working title to **DeskAct** throughout the document and all Mermaid diagrams.
 - **Public-facing positioning:** **DeskAct — AI Desktop Agent for Windows**. Tagline: *Tell your computer what to do. DeskAct gets it done.*
 - **Historical v1.3 workspace naming:** Proposed repository `deskact`; at that revision the workspace included `deskact-core`, `deskact-tools`, `deskact-cli`, and `deskact-hud`. **Superseded by the single-app structure in v1.4.**
 - **Architecture and MVP scope unchanged:** Rust/Tokio core, Tauri v2 HUD, deterministic routing with one primary LLM fallback, accessibility-first native automation, verified execution loop, and the phased roadmap are retained.
 
-### 21.5 v1.2 vs v1.1 — Routing simplification and operational flow
+### 21.6 v1.2 vs v1.1 — Routing simplification and operational flow
 
 - **Simplified AI routing:** Deterministic Rust command/workflow registry → **one primary LLM fallback**. No Laya, System 1 classifier, lightweight learned router or secondary LLM in MVP.
 - **Added user-facing operational flow:** PTT/text/CLI → DeskAct app/task API → deterministic router → LLM if unmatched → policy → Rust agent loop → `agent-desktop` / `agent-browser` / OS → verification → recovery / result.
