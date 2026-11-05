@@ -7,9 +7,9 @@
 **GitHub repository (proposed):** `deskact`  
 **Repository description:** An open-source AI desktop agent for Windows. Control native apps, browsers, and system tasks with natural language or voice. Built with Rust + Tauri.
 
-**Version:** 1.12 — Phase 3 browser support boundary
-**Date:** 4 November 2026  
-**Status:** Browser support boundary, LLM contract, Apache-2.0 project license, and no-bundled-sidecar distribution recorded / native Phase 0 validation pending
+**Version:** 1.13 — Native Phase 1 reduced-support boundary
+**Date:** 5 November 2026
+**Status:** Phase 0 closed no-go for broad native automation on the tested setup; Phase 1 authorized only under the reduced native support boundary below. Browser support boundary, LLM contract, project license, and no-bundled-sidecar distribution are recorded.
 **Initial platform:** Windows 10/11; other desktop platforms are out of MVP scope  
 **Product form:** **One user-facing DeskAct application and installer.** Modular Rust orchestrator in the Tauri host process; a development-only terminal harness in Phase 1; Tauri text HUD enabled in Phase 2. Users install automation CLIs separately; DeskAct does not bundle or auto-install them.
 
@@ -535,12 +535,14 @@ flowchart LR
 
 - Install `agent-desktop` separately in the developer test environment using its upstream-documented install method. Do not rely on DeskAct-bundled sidecars for this spike. Record install source, exact version, executable/runtime dependencies, and any installation or policy blockers. `agent-browser` installation and browser/CDP validation are deferred to Phase 3 and are not Phase 0 or Phase 1 gates.
 - Verify supported Windows version, `agent-desktop` permissions, CLI version and exact JSON contract.
-- Demonstrate list-apps, snapshot, skeleton/root drill-down, restore and ref action on Notepad.
+- Demonstrate list-apps, snapshot, skeleton/root drill-down, and ref action on Notepad. Automated restoration of minimized apps is outside the approved Phase 1 scope; the user must restore them manually before control.
 - Confirm safe handling for stale refs, incomplete trees and multiple windows.
 - Validate Windows packaging/runtime feasibility and redistribution requirements for `agent-desktop` and its dependencies.
 - Record reproducible evidence for target identification, delivery disposition, verification, stale/incomplete observations, and multi-window handling.
 
-**Go/no-go exit:** Produce a capability report and pin the tested `agent-desktop` version. Do not begin Phase 1 if native target identification, action/verification contracts, or Windows runtime feasibility are not viable. Browser installation, CDP, and distribution blockers do not block native Phase 1; validate them at the Phase 3 browser gate instead.
+**Recorded Phase 0 result:** On Windows 11 Pro build 26200 x64 with `agent-desktop@1.1.0`, the original broad native gate was a no-go: minimizing Calculator caused its window to disappear from inventory and `restore` returned `APP_NOT_FOUND`; one Notepad value probe had an anomalous readback, although a later isolated one-shot write verified exactly. The user authorized Phase 1 only under the reduced support boundary below; this is not a general native-app support claim.
+
+**Go/no-go exit:** Phase 0 is a no-go for broad, unqualified native automation on the tested setup. Phase 1 may proceed under the reduced scope below, retaining its 19/20 controlled Notepad exit gate. Browser installation, CDP, and distribution blockers remain deferred to the Phase 3 browser gate.
 
 ### Phase 1 — Rust orchestrator + native workflows (**current priority**)
 
@@ -548,10 +550,11 @@ flowchart LR
 - Implement Windows app discovery for Start Menu shortcuts/registered app entries, a deterministic app catalog, a user-configurable local app-entry store exposed to the dev harness, and registered workflow matching; retain direct **single primary LLM fallback** with no System 1/Laya integration.
 - Implement one primary LLM connector requiring Chat Completions compatibility, with configurable base URL/model/key, async requests, explicit synthetic connection test, locally validated JSON plans, one bounded correction request, and independent Rust risk policy. Treat provider JSON Schema, tool calling, streaming, and model discovery as optional.
 - Implement typed tool adapters, on-demand subprocess manager, process timeout/cancellation handling and logical session reuse where supported.
+- Treat `launch` as an activation attempt, not authoritative app identity. After launch, enumerate windows and proceed only when exactly one accessible window matches the selected app; fail closed for missing or ambiguous targets. If the target is minimized, ask the user to restore it manually, then re-enumerate and take a fresh snapshot; do not invoke automated restore in this scope.
 - Implement readiness poller, snapshot observation, scoped refs, verification and safe recovery.
 - Add bounded in-memory task context, event trace and test fixtures for structured tool responses.
 
-**Exit:** The development-only console harness reliably completes controlled Notepad multi-step workflows using the same in-process Rust modules intended for the Tauri host, and reports safe recovery/failures. Meet the 19/20 Notepad target; run capability-specific checks for Calculator, File Explorer, and VLC without implying the same reliability threshold. Browser checks remain best-effort and are not the native Phase 1 reliability gate.
+**Exit:** The development-only console harness reliably completes controlled Notepad multi-step workflows using the same in-process Rust modules intended for the Tauri host, and reports safe recovery/failures. Meet the 19/20 Notepad target within the reduced scope: accessible, uniquely matched, non-minimized windows (users restore minimized apps manually). Run capability-specific checks for Calculator, File Explorer, and VLC without implying the same reliability threshold. Browser checks remain best-effort and are not the native Phase 1 reliability gate.
 
 ### Phase 2a — Text-first Tauri HUD
 
@@ -583,13 +586,15 @@ flowchart LR
 
 ## 17. Phase 1 Acceptance Tests
 
+**Fixture safety:** File and media workflows use synthetic or user-approved fixtures in a unique per-run workspace under the operating-system temporary directory. Do not read, overwrite, or delete unrelated user files; only test-created artifacts may be cleaned up.
+
 | Test | Input / injected condition | Required result |
 |---|---|---|
-| AT-01 | “Open Calculator” | Known alias bypasses LLM; targeted window observed |
-| AT-02 | Launch Notepad while closed | App launched and correct window discovered before action |
-| AT-03 | Notepad minimized | Correct window restored if required and resnapshot taken |
-| AT-04 | Type into Notepad | Text delivered, then verified in observable editor state |
-| AT-05 | Save note to an approved path | Verify intended path and expected content; an already-existing file alone is insufficient evidence |
+| AT-01 | “Open Calculator and calculate 7 × 6” | Known alias bypasses LLM; one eligible target window is identified; a fresh accessibility snapshot shows result 42 |
+| AT-02 | Launch Notepad while closed | Treat launch as activation only; use fresh window inventory and act only if exactly one eligible Notepad window matches; do not trust the launch PID alone |
+| AT-03 | Notepad minimized | Ask the user to restore it manually; re-enumerate and resnapshot, then act only on one eligible match; otherwise stop safely |
+| AT-04 | Enter a fixed marker in a fresh temporary Notepad document | A fresh snapshot/get shows the exact marker in the editor; no existing user document is used |
+| AT-05 | Save the Notepad test document to a unique path in the run workspace | Verify the exact destination and independently read back the expected file contents; never overwrite an unrelated file |
 | AT-06 | Stale qualified ref | Fresh snapshot and re-identification; retry only if safe |
 | AT-07 | Ambiguous window/element | Disambiguation or safe stop; no wrong-target mutation |
 | AT-08 | `INVALID_ARGS` | Correct validated invocation; no blind retry loop |
@@ -597,7 +602,7 @@ flowchart LR
 | AT-10 | Mutating action timeout with unknown delivery | Observe post-state before retry; avoid duplicate side effect |
 | AT-11 | Permission denied | Clear actionable error, not repeated tool calls |
 | AT-12 | User cancellation | Further steps stopped; in-flight uncertainty disclosed |
-| AT-13 | Open VLC and play a controlled local test media file | Verify playback state where observable; otherwise report delivered/unverified or partial |
+| AT-13 | Open VLC and play a short deterministic fixture from the run workspace | Verify a playing state and advancing playback position where accessible; otherwise report partial/unverified, not success |
 | AT-14 | Unknown but valid multi-step task | Same primary LLM interprets and produces a bounded structured plan |
 | AT-15 | Known registered multi-step workflow | Runs without LLM call, but still performs policy and step verification |
 | AT-16 | Unrecognized command requesting arbitrary shell | Rejected or safely reframed; never passed raw into `cmd.exe`/PowerShell |
@@ -612,8 +617,8 @@ flowchart LR
 | AT-25 | User changes target UI during execution | Pause, re-observe and revalidate before continuing; ask if safe resumption is unclear |
 | AT-26 | LLM claims a goal is complete without verifier evidence | Do not report completed; return partial/unverified or failed with reason |
 | AT-27 | Phase 3: attach to dedicated Edge profile, pin intended tab, navigate to `https://example.com`, verify title/URL, enter title in Notepad | Repeatably verify both browser and Notepad outcomes; confirm loopback-only listener and no unrelated tab/profile touched; best-effort only |
-| AT-28 | Find and open a known folder or file through File Explorer | Correct target is opened; ambiguous matches trigger clarification rather than arbitrary selection |
-| AT-29 | Open a uniquely discoverable Windows app by name | Correct app launches directly without approval; readiness and target window are verified |
+| AT-28 | Navigate File Explorer to a unique fixture folder and open its known test file | Verify the folder path and file name from fresh UI evidence; ambiguous targets trigger clarification rather than arbitrary selection |
+| AT-29 | Open a uniquely discoverable Windows app by name | Launch is treated as activation only; verify exactly one eligible target window from fresh inventory before acting; fail closed if missing or ambiguous |
 | AT-30 | App name maps to multiple discovered entries | Show candidates and ask; no random selection; a unique user alias resolves future requests |
 | AT-31 | Launched app exposes no usable accessibility controls | Report limitation; do not use blind coordinate clicks or arbitrary commands |
 | AT-32 | `agent-desktop` missing or incompatible | Do not execute native tasks; show the exact install/upgrade instructions and required version |
@@ -823,6 +828,14 @@ These investigations do not require introducing a new AI router or additional pr
 - **Unchanged:** Rust-first architecture, verification-oriented agent loop, safe retries, limited ephemeral memory, Tauri text/PTT Phase 2, CDP Phase 3.
 
 **Deferred investigation only:** A learned router could be evaluated after real usage data exists. It is not a scheduled deliverable and not an MVP dependency.
+
+### 21.12 v1.13 vs v1.12 — Native Phase 0 no-go and reduced Phase 1 support
+
+- **Phase 0 outcome:** The tested Windows setup did not pass the broad native automation gate, particularly minimized-window recovery. This is a setup-specific no-go, not a universal statement about Windows apps.
+- **Reduced Phase 1 scope:** Continue with `agent-desktop@1.1.0` only for accessible, uniquely matched, non-minimized windows. Users must restore minimized apps manually; DeskAct then re-enumerates and snapshots before acting.
+- **Target identity:** Treat launch as activation evidence only. Fresh `list-windows` inventory is authoritative; proceed only with exactly one eligible window matching the selected app, otherwise stop safely.
+- **Reliability and verification:** Retain the 19/20 controlled Notepad exit gate. Notepad text and saved-file content require independent readback; Explorer path/name, Calculator result, and VLC playback/position require fresh evidence. Preserve partial/unverified reporting when evidence is unavailable.
+- **Browser:** `agent-browser`, Chrome/Edge/CDP, and other browser checks remain deferred to Phase 3.
 
 ## 22. Documentation and Implementation References
 
