@@ -47,7 +47,7 @@ This download is separate from npm installation. Planned Phase 3 browser support
 
 ## Phase 1 developer harness
 
-The developer-only Rust harness checks the user-installed native CLI, discovers app entries from Start Menu shortcuts and registered App Paths, and lists currently running GUI apps. It does not install tools or control apps. Catalog entries are shown as discovered, not as proof they are launchable or expose usable accessibility controls; discovery reflects only these Windows sources.
+The developer-only Rust harness checks the user-installed native CLI, discovers app entries from Start Menu shortcuts and registered App Paths, and lists currently running GUI apps. It does not install tools or control apps. Catalog entries are shown as discovered, not as proof they are launchable or expose usable accessibility controls; discovery reflects only these Windows sources. Start Menu shortcuts without a file target are skipped and their count is reported.
 
 From a Rust development environment on Windows, run from the repository root:
 

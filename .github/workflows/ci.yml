@@ -32,6 +32,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build all targets
         run: cargo build --manifest-path src-tauri/Cargo.toml --all-targets --release --locked
+      - name: Run Windows integration tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets --release --locked
       - name: Upload Windows developer harness
         uses: actions/upload-artifact@v7
         with:

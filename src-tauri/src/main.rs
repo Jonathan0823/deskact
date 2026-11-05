@@ -1,3 +1,5 @@
+//! Developer-only command-line harness for native preflight and inventory.
+
 use std::{env, process::ExitCode};
 
 use deskact_core::{native_inventory, preflight};
@@ -22,6 +24,10 @@ fn main() -> ExitCode {
                     inventory.preflight.tool_version, inventory.preflight.contract_version
                 );
                 println!("Discovered app entries: {}", inventory.catalog.len());
+                println!(
+                    "Skipped Start Menu shortcuts without file targets: {}",
+                    inventory.skipped_start_menu_shortcuts
+                );
                 for app in &inventory.catalog {
                     println!("- {} [{}] -> {}", app.name, app.source, app.target);
                 }
