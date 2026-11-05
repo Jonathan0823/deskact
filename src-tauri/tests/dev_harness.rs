@@ -104,6 +104,21 @@ fn run_harness_with_apps_exit_code(
 }
 
 #[test]
+fn notepad_acceptance_zero_runs_uses_the_usage_error_path() {
+    let output = Command::new(env!("CARGO_BIN_EXE_deskact-dev"))
+        .args(["notepad-acceptance", "--runs", "0"])
+        .output()
+        .expect("run developer harness");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("Usage: deskact-dev notepad-acceptance [--runs <count>]"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
 fn preflight_reports_the_supported_native_tool_and_contract() {
     let fake = FakeAgentDesktop::new(
         r#"{"version":"2.6","ok":true,"command":"version","data":{"os":"windows","target":"x86_64","version":"1.1.0"}}"#,

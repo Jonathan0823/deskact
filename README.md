@@ -47,7 +47,7 @@ This download is separate from npm installation. Planned Phase 3 browser support
 
 ## Phase 1 developer harness
 
-The developer-only Rust harness checks the user-installed native CLI, discovers app entries from Start Menu shortcuts and registered App Paths, and lists currently running GUI apps. Its `resolve` command can activate a discovered app, then identify a unique accessible window from fresh window inventory and take a fresh accessibility snapshot; this is a target-resolution smoke check, not a general task executor. It does not install tools. Catalog entries are shown as discovered, not as proof they are launchable or expose usable accessibility controls; discovery reflects only these Windows sources. Start Menu shortcuts without a file target are skipped and their count is reported.
+The developer-only Rust harness checks the user-installed native CLI, discovers app entries from Start Menu shortcuts and registered App Paths, and lists currently running GUI apps. Its `resolve` command can activate a discovered app, then identify a unique accessible window from fresh window inventory and take a fresh accessibility snapshot; this is a target-resolution smoke check, not a general task executor. The controlled Notepad acceptance command creates a new tab only in exactly one accessible, non-minimized, owner-verified existing Notepad window, saves a fixed marker under a unique temporary directory, verifies both fresh editor readback and file contents, then closes only the tab whose unique saved filename was verified. It preserves existing tabs, does not inspect their document contents, and cleans up only its own test file and directory. A run is verified only after the original tab/window state is observed again. The default 20-run gate requires at least 19 verified runs; failures and partial evidence are reported, and ambiguous UI states fail closed. It does not install tools. Catalog entries are shown as discovered, not as proof they are launchable or expose usable accessibility controls; discovery reflects only these Windows sources. Start Menu shortcuts without a file target are skipped and their count is reported.
 
 From a Rust development environment on Windows, run from the repository root:
 
@@ -55,11 +55,14 @@ From a Rust development environment on Windows, run from the repository root:
 cargo run --manifest-path src-tauri/Cargo.toml -- preflight
 cargo run --manifest-path src-tauri/Cargo.toml -- inventory
 cargo run --manifest-path src-tauri/Cargo.toml -- resolve Calculator
+cargo run --manifest-path src-tauri/Cargo.toml -- notepad-acceptance
+# Optional short smoke check (does not assess the 19/20 gate):
+cargo run --manifest-path src-tauri/Cargo.toml -- notepad-acceptance --runs 1
 ```
 
-If the matching window is minimized, the harness asks you to restore it manually, then re-enumerates windows and takes a fresh snapshot. It never relies on launch output alone to select a window, and stops on missing, ambiguous, inaccessible, or unverified targets. The native CLI must be installed separately as described above. For a non-default npm installation, set `DESKACT_AGENT_DESKTOP` to the underlying executable path; do not point it at a PowerShell script or shell wrapper. Set `DESKACT_POWERSHELL` only when PowerShell is not discoverable by its default executable name. The harness reports discovered app names, targets, and sources, plus running app names, process IDs, and presentation state returned by `agent-desktop`.
+If the matching window is minimized, the harness asks you to restore it manually, then re-enumerates windows and takes a fresh snapshot. The Notepad acceptance command requires one already-open, uniquely matched accessible Notepad window; it uses Ctrl+N and Ctrl+W only after fresh state checks and never treats a delivered shortcut/click as proof of success. It never relies on launch output alone to select a window, and stops on missing, ambiguous, inaccessible, or unverified targets. The native CLI must be installed separately as described above. For a non-default npm installation, set `DESKACT_AGENT_DESKTOP` to the underlying executable path; do not point it at a PowerShell script or shell wrapper. Set `DESKACT_POWERSHELL` only when PowerShell is not discoverable by its default executable name. The harness reports discovered app names, targets, and sources, plus running app names, process IDs, and presentation state returned by `agent-desktop`.
 
-The Windows CI job uploads a `deskact-dev-windows-x64` artifact for 14 days. This is a developer command-line harness, not an installer or end-user DeskAct app; it still requires the separately installed `agent-desktop` CLI.
+The default command runs 20 scenarios and passes only with at least 19 independently verified successes. `--runs` accepts counts from 1 through 100; shorter counts are smoke checks, not reliability-gate results. The Windows CI job uploads a `deskact-dev-windows-x64` artifact for 14 days. This is a developer command-line harness, not an installer or end-user DeskAct app; it still requires the separately installed `agent-desktop` CLI.
 
 ## License
 
