@@ -12,11 +12,16 @@ struct FakeAgentDesktop {
     dir: PathBuf,
     executable: PathBuf,
     powershell: PathBuf,
+    invocation_log: PathBuf,
 }
 
 impl FakeAgentDesktop {
     fn new(version_response: &str, apps_response: &str) -> Self {
-        Self::with_catalog(version_response, apps_response, "[]")
+        Self::with_catalog(
+            version_response,
+            apps_response,
+            r#"{"entries":[],"skipped_start_menu_shortcuts":0}"#,
+        )
     }
 
     fn with_catalog(version_response: &str, apps_response: &str, catalog_response: &str) -> Self {
@@ -28,10 +33,11 @@ impl FakeAgentDesktop {
             std::env::temp_dir().join(format!("deskact-test-{}-{unique}", std::process::id()));
         fs::create_dir_all(&dir).expect("create temporary test directory");
         let executable = dir.join("agent-desktop");
+        let invocation_log = dir.join("invocations.log");
         fs::write(
             &executable,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\n  version) printf '%s\\n' '{}' ;;\n  list-apps) printf '%s\\n' '{}' ;;\n  *) echo unexpected command >&2; exit 2 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$DESKACT_TEST_INVOCATIONS\"\ncase \"$1\" in\n  version) printf '%s\\n' '{}' ;;\n  list-apps) printf '%s\\n' '{}'; exit \"${{DESKACT_TEST_APPS_EXIT_CODE:-0}}\" ;;\n  *) echo unexpected command >&2; exit 2 ;;\nesac\n",
                 version_response,
                 apps_response
             ),
@@ -59,11 +65,16 @@ impl FakeAgentDesktop {
             dir,
             executable,
             powershell,
+            invocation_log,
         }
     }
 
     fn path(&self) -> &Path {
         &self.executable
+    }
+
+    fn invocation_log(&self) -> &Path {
+        &self.invocation_log
     }
 }
 
@@ -74,10 +85,20 @@ impl Drop for FakeAgentDesktop {
 }
 
 fn run_harness(fake: &FakeAgentDesktop, command: &str) -> Output {
+    run_harness_with_apps_exit_code(fake, command, 0)
+}
+
+fn run_harness_with_apps_exit_code(
+    fake: &FakeAgentDesktop,
+    command: &str,
+    exit_code: u8,
+) -> Output {
     Command::new(env!("CARGO_BIN_EXE_deskact-dev"))
         .arg(command)
         .env("DESKACT_AGENT_DESKTOP", fake.path())
         .env("DESKACT_POWERSHELL", &fake.powershell)
+        .env("DESKACT_TEST_INVOCATIONS", fake.invocation_log())
+        .env("DESKACT_TEST_APPS_EXIT_CODE", exit_code.to_string())
         .output()
         .expect("run developer harness")
 }
@@ -148,9 +169,48 @@ fn preflight_rejects_an_unsupported_cli_architecture() {
 }
 
 #[test]
+fn preflight_checks_contract_before_deserializing_version_data() {
+    let fake = FakeAgentDesktop::new(
+        r#"{"version":"2.7","ok":true,"command":"version","data":{"incompatible":"version payload"}}"#,
+        r#"{"version":"2.6","ok":true,"command":"list-apps","data":{"apps":[]}}"#,
+    );
+
+    let output = run_harness(&fake, "preflight");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("Unsupported agent-desktop JSON contract 2.7"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("version response data was invalid"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn preflight_reports_cli_error_before_decoding_failed_version_data() {
+    let fake = FakeAgentDesktop::new(
+        r#"{"version":"2.6","ok":false,"command":"version","data":{"unexpected":true},"error":{"message":"version unavailable"}}"#,
+        r#"{"version":"2.6","ok":true,"command":"list-apps","data":{"apps":[]}}"#,
+    );
+
+    let output = run_harness(&fake, "preflight");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(stderr.contains("version unavailable"), "{stderr}");
+    assert!(
+        !stderr.contains("version response data was invalid"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn preflight_rejects_an_incompatible_json_contract() {
     let fake = FakeAgentDesktop::new(
-        r#"{"version":"2.7","ok":true,"command":"version","data":{"os":"windows","target":"x86_64","version":"1.1.0"}}"#,
+        r#"{"version":"2.7","ok":true,"command":"version","data":{"incompatible":"version payload"}}"#,
         r#"{"version":"2.6","ok":true,"command":"list-apps","data":{"apps":[]}}"#,
     );
 
@@ -178,6 +238,8 @@ fn inventory_preflight_failure_prevents_further_native_tool_operations() {
     assert!(!output.status.success());
     assert!(stderr.contains("requires exactly 1.1.0"), "{stderr}");
     assert!(!stderr.contains("invalid JSON"), "{stderr}");
+    let calls = fs::read_to_string(fake.invocation_log()).expect("read required invocation log");
+    assert_eq!(calls.lines().collect::<Vec<_>>(), ["version"]);
 }
 
 #[test]
@@ -207,7 +269,7 @@ fn inventory_lists_the_discovered_start_menu_and_registered_app_catalog() {
     let fake = FakeAgentDesktop::with_catalog(
         r#"{"version":"2.6","ok":true,"command":"version","data":{"os":"windows","target":"x86_64","version":"1.1.0"}}"#,
         r#"{"version":"2.6","ok":true,"command":"list-apps","data":{"apps":[]}}"#,
-        r#"[{"name":"Notepad","target":"C:\\Windows\\System32\\notepad.exe","arguments":"","working_directory":"","source":"start-menu"},{"name":"Calculator","target":"C:\\Windows\\System32\\calc.exe","arguments":"","working_directory":"","source":"app-paths"}]"#,
+        r#"{"entries":[{"name":"Notepad","target":"C:\\Windows\\System32\\notepad.exe","arguments":"","working_directory":"","source":"start-menu"},{"name":"Calculator","target":"C:\\Windows\\System32\\calc.exe","arguments":"","working_directory":"","source":"app-paths"}],"skipped_start_menu_shortcuts":0}"#,
     );
 
     let output = run_harness(&fake, "inventory");
@@ -228,7 +290,7 @@ fn inventory_preserves_discovered_targets_for_inspection() {
     let fake = FakeAgentDesktop::with_catalog(
         r#"{"version":"2.6","ok":true,"command":"version","data":{"os":"windows","target":"x86_64","version":"1.1.0"}}"#,
         r#"{"version":"2.6","ok":true,"command":"list-apps","data":{"apps":[]}}"#,
-        r#"[{"name":"Notepad","target":"C:\\Windows\\System32\\notepad.exe","arguments":"","working_directory":"","source":"start-menu"},{"name":"Help","target":"C:\\Program Files\\Help\\manual.chm","arguments":"","working_directory":"","source":"start-menu"}]"#,
+        r#"{"entries":[{"name":"Notepad","target":"C:\\Windows\\System32\\notepad.exe","arguments":"","working_directory":"","source":"start-menu"},{"name":"Help","target":"C:\\Program Files\\Help\\manual.chm","arguments":"","working_directory":"","source":"start-menu"}],"skipped_start_menu_shortcuts":1}"#,
     );
 
     let output = run_harness(&fake, "inventory");
@@ -242,6 +304,10 @@ fn inventory_preserves_discovered_targets_for_inspection() {
     assert!(stdout.contains("Discovered app entries: 2"), "{stdout}");
     assert!(stdout.contains("Help [start-menu]"), "{stdout}");
     assert!(stdout.contains("manual.chm"), "{stdout}");
+    assert!(
+        stdout.contains("Skipped Start Menu shortcuts without file targets: 1"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -260,6 +326,21 @@ fn inventory_reports_windows_catalog_discovery_errors_without_claiming_success()
         stderr.contains("Windows app discovery returned invalid JSON"),
         "{stderr}"
     );
+}
+
+#[test]
+fn inventory_uses_structured_cli_error_from_nonzero_exit() {
+    let fake = FakeAgentDesktop::new(
+        r#"{"version":"2.6","ok":true,"command":"version","data":{"os":"windows","target":"x86_64","version":"1.1.0"}}"#,
+        r#"{"version":"2.6","ok":false,"command":"list-apps","error":{"message":"access denied"}}"#,
+    );
+
+    let output = run_harness_with_apps_exit_code(&fake, "inventory", 17);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(stderr.contains("access denied"), "{stderr}");
+    assert!(!stderr.contains("exited with status"), "{stderr}");
 }
 
 #[test]
@@ -292,4 +373,6 @@ fn preflight_reports_actionable_guidance_when_the_cli_is_missing() {
         stderr.contains("npm install --global agent-desktop@1.1.0"),
         "{stderr}"
     );
+    assert!(stderr.contains("DESKACT_AGENT_DESKTOP"), "{stderr}");
+    assert!(stderr.contains("agent-desktop-win32-x64.exe"), "{stderr}");
 }
