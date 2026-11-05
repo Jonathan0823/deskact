@@ -137,6 +137,22 @@ fn preflight_rejects_an_incompatible_json_contract() {
 }
 
 #[test]
+fn inventory_preflight_failure_prevents_further_native_tool_operations() {
+    let fake = FakeAgentDesktop::with_catalog(
+        r#"{"version":"2.6","ok":true,"command":"version","data":{"os":"windows","target":"x86_64","version":"1.2.0"}}"#,
+        "not-json",
+        "not-json",
+    );
+
+    let output = run_harness(&fake, "inventory");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(stderr.contains("requires exactly 1.1.0"), "{stderr}");
+    assert!(!stderr.contains("invalid JSON"), "{stderr}");
+}
+
+#[test]
 fn inventory_lists_running_apps_in_a_stable_order() {
     let fake = FakeAgentDesktop::new(
         r#"{"version":"2.6","ok":true,"command":"version","data":{"os":"windows","target":"x86_64","version":"1.1.0"}}"#,
@@ -174,13 +190,13 @@ fn inventory_lists_the_discovered_start_menu_and_registered_app_catalog() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("harness output is UTF-8");
-    assert!(stdout.contains("Discovered native apps: 2"), "{stdout}");
+    assert!(stdout.contains("Discovered app entries: 2"), "{stdout}");
     assert!(stdout.contains("Calculator [app-paths]"), "{stdout}");
     assert!(stdout.contains("Notepad [start-menu]"), "{stdout}");
 }
 
 #[test]
-fn inventory_omits_shortcuts_that_do_not_target_an_executable() {
+fn inventory_preserves_discovered_targets_for_inspection() {
     let fake = FakeAgentDesktop::with_catalog(
         r#"{"version":"2.6","ok":true,"command":"version","data":{"os":"windows","target":"x86_64","version":"1.1.0"}}"#,
         r#"{"version":"2.6","ok":true,"command":"list-apps","data":{"apps":[]}}"#,
@@ -195,8 +211,9 @@ fn inventory_omits_shortcuts_that_do_not_target_an_executable() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("harness output is UTF-8");
-    assert!(stdout.contains("Discovered native apps: 1"), "{stdout}");
-    assert!(!stdout.contains("Help [start-menu]"), "{stdout}");
+    assert!(stdout.contains("Discovered app entries: 2"), "{stdout}");
+    assert!(stdout.contains("Help [start-menu]"), "{stdout}");
+    assert!(stdout.contains("manual.chm"), "{stdout}");
 }
 
 #[test]

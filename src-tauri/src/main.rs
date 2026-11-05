@@ -21,7 +21,7 @@ fn main() -> ExitCode {
                     "agent-desktop {} (JSON contract {}) is ready",
                     inventory.preflight.tool_version, inventory.preflight.contract_version
                 );
-                println!("Discovered native apps: {}", inventory.catalog.len());
+                println!("Discovered app entries: {}", inventory.catalog.len());
                 for app in &inventory.catalog {
                     println!("- {} [{}] -> {}", app.name, app.source, app.target);
                 }
