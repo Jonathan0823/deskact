@@ -62,6 +62,43 @@ pub struct NativeInventory {
     pub running_apps: Vec<RunningApp>,
 }
 
+/// A fresh, uniquely matched native window with an accessibility snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedNativeTarget {
+    /// Discovered catalog entry selected by its exact display name (case-insensitive).
+    pub app: DiscoveredApp,
+    /// Window identity from the fresh `list-windows` response.
+    pub window: NativeWindow,
+    /// Identifier of the fresh complete accessibility snapshot.
+    pub snapshot_id: String,
+    /// Number of actionable accessibility references in the snapshot.
+    pub ref_count: usize,
+}
+
+/// Window returned by `agent-desktop list-windows`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct NativeWindow {
+    pub id: String,
+    pub title: String,
+    pub app_name: String,
+    pub accessible: bool,
+    pub minimized: bool,
+    #[serde(default)]
+    pub visible: bool,
+    #[serde(default)]
+    pub pid: u32,
+}
+
+/// Resolution may pause so the user can manually restore a minimized window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeTargetResolution {
+    Ready(ResolvedNativeTarget),
+    NeedsManualRestore {
+        app: DiscoveredApp,
+        window: NativeWindow,
+    },
+}
+
 /// Error returned when native CLI preflight or inventory cannot be completed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeskActError(String);
@@ -171,6 +208,196 @@ impl VerifiedNativeCli {
     fn invoke(&self, command: &str) -> Result<Output, DeskActError> {
         run_agent_desktop(&self.executable, command)
     }
+
+    fn invoke_args(&self, args: &[&str], command_name: &str) -> Result<Output, DeskActError> {
+        let mut command = Command::new(&self.executable);
+        command.args(args);
+        match run_command_with_timeout(&mut command, NATIVE_PROCESS_TIMEOUT) {
+            Ok(output) => Ok(output),
+            Err(CommandRunError::TimedOut) => Err(DeskActError(format!(
+                "agent-desktop `{command_name}` timed out after {} seconds",
+                NATIVE_PROCESS_TIMEOUT.as_secs()
+            ))),
+            Err(CommandRunError::Io(error)) => Err(DeskActError(format!(
+                "Could not start agent-desktop `{command_name}`: {error}. {INSTALL_GUIDANCE}"
+            ))),
+        }
+    }
+
+    /// Launch a selected catalog entry, then identify its window from fresh inventory.
+    pub fn resolve_target(
+        &self,
+        app: DiscoveredApp,
+    ) -> Result<NativeTargetResolution, DeskActError> {
+        let target = app.target.trim();
+        if target.is_empty() {
+            return Err(DeskActError(format!(
+                "The discovered target for `{}` is empty; no app was launched.",
+                app.name
+            )));
+        }
+        if !app.arguments.trim().is_empty() {
+            return Err(DeskActError(format!(
+                "The discovered shortcut for `{}` requires arguments that this harness does not yet parse safely. No app was launched.",
+                app.name
+            )));
+        }
+        let mut launch_args = vec!["launch".to_owned(), target.to_owned()];
+        if !app.working_directory.trim().is_empty() {
+            launch_args.push("--cwd".into());
+            launch_args.push(app.working_directory.clone());
+        }
+        let launch_args: Vec<_> = launch_args.iter().map(String::as_str).collect();
+        let launch = self.invoke_args(&launch_args, "launch")?;
+        let launch: Envelope<serde_json::Value> = parse_envelope(&launch, "launch")?;
+        if launch.version != SUPPORTED_JSON_CONTRACT_VERSION {
+            return Err(DeskActError(format!(
+                "Unsupported agent-desktop JSON contract {} in launch response (DeskAct requires {}).",
+                launch.version, SUPPORTED_JSON_CONTRACT_VERSION
+            )));
+        }
+        if !launch.ok {
+            return Err(cli_error("launch", launch.error));
+        }
+        self.resolve_window_state(app)
+    }
+
+    /// Resume after the user restores a minimized app; never relaunches it.
+    pub fn resume_after_manual_restore(
+        &self,
+        app: DiscoveredApp,
+    ) -> Result<NativeTargetResolution, DeskActError> {
+        self.resolve_window_state(app)
+    }
+
+    fn resolve_window_state(
+        &self,
+        app: DiscoveredApp,
+    ) -> Result<NativeTargetResolution, DeskActError> {
+        let output = self.invoke("list-windows")?;
+        let envelope: Envelope<Vec<NativeWindow>> = parse_envelope(&output, "list-windows")?;
+        if envelope.version != SUPPORTED_JSON_CONTRACT_VERSION {
+            return Err(DeskActError(format!(
+                "Unsupported agent-desktop JSON contract {} in window inventory (DeskAct requires {}).",
+                envelope.version, SUPPORTED_JSON_CONTRACT_VERSION
+            )));
+        }
+        if !envelope.ok {
+            return Err(cli_error("list-windows", envelope.error));
+        }
+        let windows = envelope.data.ok_or_else(|| {
+            DeskActError("agent-desktop window inventory did not include data".into())
+        })?;
+        let expected_process = executable_stem(&app.target);
+        let matching: Vec<_> = windows
+            .into_iter()
+            .filter(|window| window.app_name.eq_ignore_ascii_case(&expected_process))
+            .collect();
+        if matching.is_empty() {
+            return Err(DeskActError(format!(
+                "No fresh window matched `{}` (target process `{expected_process}`) after launch. No window was selected.",
+                app.name
+            )));
+        }
+        let accessible: Vec<_> = matching
+            .into_iter()
+            .filter(|window| window.accessible)
+            .collect();
+        if accessible.is_empty() {
+            return Err(DeskActError(format!(
+                "No matching window for `{}` exposes accessible controls. No action is permitted.",
+                app.name
+            )));
+        }
+        if accessible.len() != 1 {
+            return Err(DeskActError(format!(
+                "Found {} accessible windows matching `{}`; exactly one is required. No window was selected.",
+                accessible.len(),
+                app.name
+            )));
+        }
+        let window = accessible
+            .into_iter()
+            .next()
+            .expect("one accessible window");
+        if window.minimized {
+            return Ok(NativeTargetResolution::NeedsManualRestore { app, window });
+        }
+
+        let output = self.invoke_args(
+            &[
+                "snapshot",
+                "--app",
+                &window.app_name,
+                "--window-id",
+                &window.id,
+                "-i",
+            ],
+            "snapshot",
+        )?;
+        let snapshot: Envelope<serde_json::Value> = parse_envelope(&output, "snapshot")?;
+        if snapshot.version != SUPPORTED_JSON_CONTRACT_VERSION {
+            return Err(DeskActError(format!(
+                "Unsupported agent-desktop JSON contract {} in accessibility snapshot (DeskAct requires {}).",
+                snapshot.version, SUPPORTED_JSON_CONTRACT_VERSION
+            )));
+        }
+        if !snapshot.ok {
+            return Err(cli_error("snapshot", snapshot.error));
+        }
+        let data = snapshot.data.ok_or_else(|| {
+            DeskActError("agent-desktop accessibility snapshot did not include data".into())
+        })?;
+        let snapshot_window_id = data
+            .pointer("/window/id")
+            .and_then(serde_json::Value::as_str);
+        if snapshot_window_id != Some(window.id.as_str()) {
+            return Err(DeskActError(format!(
+                "Fresh accessibility snapshot did not confirm the selected window `{}`. No target was returned.",
+                window.id
+            )));
+        }
+        if data.get("complete").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(DeskActError(format!(
+                "Accessibility snapshot for `{}` was incomplete. No target was returned.",
+                window.title
+            )));
+        }
+        let ref_count = data
+            .get("ref_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
+        if ref_count == 0 {
+            return Err(DeskActError(format!(
+                "Accessibility snapshot for `{}` exposed no actionable controls. No target was returned.",
+                window.title
+            )));
+        }
+        let snapshot_id = data
+            .get("snapshot_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                DeskActError("Accessibility snapshot did not include a snapshot identifier".into())
+            })?
+            .to_owned();
+
+        Ok(NativeTargetResolution::Ready(ResolvedNativeTarget {
+            app,
+            window,
+            snapshot_id,
+            ref_count,
+        }))
+    }
+}
+
+fn executable_stem(target: &str) -> String {
+    let file_name = target.rsplit(['\\', '/']).next().unwrap_or(target);
+    file_name
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(file_name)
+        .to_owned()
 }
 
 #[derive(Deserialize)]
@@ -206,7 +433,44 @@ pub fn native_inventory() -> Result<NativeInventory, DeskActError> {
     let preflight = cli.preflight_status().clone();
     let running_apps = cli.running_apps()?;
     let discovery = windows_catalog::discover_app_catalog()?;
-    let mut catalog = discovery.entries;
+    let catalog = normalize_catalog(discovery.entries);
+
+    Ok(NativeInventory {
+        preflight,
+        catalog,
+        skipped_start_menu_shortcuts: discovery.skipped_start_menu_shortcuts,
+        running_apps,
+    })
+}
+
+/// Launch a uniquely named discovered app and resolve its fresh accessible window.
+pub fn resolve_native_target(app_name: &str) -> Result<NativeTargetResolution, DeskActError> {
+    let cli = VerifiedNativeCli::connect()?;
+    let discovery = windows_catalog::discover_app_catalog()?;
+    let catalog = normalize_catalog(discovery.entries);
+    let matches: Vec<_> = catalog
+        .into_iter()
+        .filter(|app| app.name.eq_ignore_ascii_case(app_name.trim()))
+        .collect();
+    let app = match matches.as_slice() {
+        [] => {
+            return Err(DeskActError(format!(
+                "No discovered app exactly matches `{}`. Choose a name from `deskact-dev inventory`.",
+                app_name.trim()
+            )));
+        }
+        [app] => app.clone(),
+        _ => {
+            return Err(DeskActError(format!(
+                "Multiple discovered entries are named `{}`. No app was launched.",
+                app_name.trim()
+            )));
+        }
+    };
+    cli.resolve_target(app)
+}
+
+fn normalize_catalog(mut catalog: Vec<DiscoveredApp>) -> Vec<DiscoveredApp> {
     catalog.sort_by_key(|app| {
         (
             app.name.to_lowercase(),
@@ -219,13 +483,7 @@ pub fn native_inventory() -> Result<NativeInventory, DeskActError> {
             && left.target.eq_ignore_ascii_case(&right.target)
             && left.arguments == right.arguments
     });
-
-    Ok(NativeInventory {
-        preflight,
-        catalog,
-        skipped_start_menu_shortcuts: discovery.skipped_start_menu_shortcuts,
-        running_apps,
-    })
+    catalog
 }
 
 /// Parse a successful CLI envelope, preserving structured errors from nonzero exits.
