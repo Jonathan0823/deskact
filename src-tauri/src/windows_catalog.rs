@@ -77,8 +77,7 @@ try {
             }
         }
     }
-    $sorted = @($entries | Sort-Object name, target, arguments, source -Unique)
-    ConvertTo-Json -InputObject $sorted -Depth 4 -Compress
+    ConvertTo-Json -InputObject $entries.ToArray() -Depth 4 -Compress
 } catch {
     [Console]::Error.WriteLine($_.Exception.Message)
     exit 1
