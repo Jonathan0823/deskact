@@ -554,12 +554,19 @@ pub fn native_inventory() -> Result<NativeInventory, DeskActError> {
     })
 }
 
+const MAX_NOTEPAD_ACCEPTANCE_RUNS: usize = 100;
+
 /// Run controlled Notepad acceptance scenarios in isolated, newly created tabs.
 pub fn run_notepad_acceptance(runs: usize) -> Result<NotepadAcceptanceReport, DeskActError> {
     if runs == 0 {
         return Err(DeskActError(
             "The Notepad acceptance run count must be greater than zero".into(),
         ));
+    }
+    if runs > MAX_NOTEPAD_ACCEPTANCE_RUNS {
+        return Err(DeskActError(format!(
+            "Notepad acceptance run count must not exceed {MAX_NOTEPAD_ACCEPTANCE_RUNS}"
+        )));
     }
     let cli = VerifiedNativeCli::connect()?;
     let mut failures = Vec::new();
@@ -585,8 +592,10 @@ pub fn run_notepad_acceptance(runs: usize) -> Result<NotepadAcceptanceReport, De
         )));
     }
     Ok(NotepadAcceptanceReport {
+        requested: runs,
         attempted,
         verified,
+        required,
         gate_met: runs >= 20 && verified >= required,
         failures,
     })
@@ -599,10 +608,14 @@ fn required_successes(runs: usize) -> usize {
 /// Per-run evidence summary for the controlled Notepad acceptance command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotepadAcceptanceReport {
+    /// Number of scenarios requested.
+    pub requested: usize,
     /// Number of scenarios attempted.
     pub attempted: usize,
     /// Number of scenarios independently verified end to end.
     pub verified: usize,
+    /// Minimum verified scenario count required for the requested run count.
+    pub required: usize,
     /// Whether the 20-run, 95% acceptance gate was met.
     pub gate_met: bool,
     /// Diagnostics for scenarios that did not verify.

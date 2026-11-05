@@ -42,7 +42,9 @@ fn main() -> ExitCode {
             let arguments: Vec<_> = env::args().skip(2).collect();
             let runs = match arguments.as_slice() {
                 [] => Some(20),
-                [flag, count] if flag == "--runs" => count.parse::<usize>().ok(),
+                [flag, count] if flag == "--runs" => {
+                    count.parse::<usize>().ok().filter(|runs| *runs > 0)
+                }
                 _ => None,
             };
             match runs {
@@ -50,8 +52,11 @@ fn main() -> ExitCode {
                     Ok(report) => {
                         if report.gate_met {
                             println!(
-                                "Controlled Notepad acceptance verified {}/{} runs (19/20 gate met).",
-                                report.verified, report.attempted
+                                "Controlled Notepad acceptance verified {}/{} attempted runs ({} of {} required; acceptance gate met).",
+                                report.verified,
+                                report.attempted,
+                                report.required,
+                                report.requested
                             );
                         } else {
                             println!(
