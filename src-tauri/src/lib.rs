@@ -776,7 +776,7 @@ fn run_notepad_scenario_inner(
     invoke_success(cli, &["set-value", editor_ref, &marker], "set-value")?;
 
     press_shortcut(cli, &new_tab, "ctrl+s")?;
-    let dialog = unique_save_dialog(cli, &original)?;
+    let dialog = wait_for_save_dialog(cli, &original)?;
     let save_snapshot = fresh_snapshot(cli, &dialog)?;
     let filename_field = unique_control(
         &save_snapshot,
@@ -1092,39 +1092,59 @@ fn unique_window_for_id(
     }
 }
 
-fn unique_save_dialog(
+fn wait_for_save_dialog(
     cli: &VerifiedNativeCli,
     original: &NativeWindow,
 ) -> Result<NativeWindow, DeskActError> {
-    let windows = cli.windows_for_app("notepad")?;
-    if windows.len() != 2
-        || !windows.iter().any(|window| {
-            window.id == original.id
-                && window.accessible
-                && !window.minimized
-                && window.pid == original.pid
-        })
-    {
-        return Err(DeskActError(format!(
-            "Expected the original Notepad window and one Save As dialog; found {} windows",
-            windows.len()
-        )));
-    }
-    let matching: Vec<_> = windows
-        .into_iter()
-        .filter(|window| {
-            window.title.eq_ignore_ascii_case("Save as")
-                && window.accessible
-                && !window.minimized
-                && window.pid == original.pid
-        })
-        .collect();
-    match matching.as_slice() {
-        [window] => Ok(window.clone()),
-        _ => Err(DeskActError(format!(
-            "Expected one accessible Save As dialog owned by Notepad; found {}",
-            matching.len()
-        ))),
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let windows = cli.windows_for_app("notepad")?;
+        if windows.len() == 2 {
+            let original_present = windows.iter().any(|window| {
+                window.id == original.id
+                    && window.accessible
+                    && !window.minimized
+                    && window.pid == original.pid
+            });
+            if !original_present {
+                return Err(DeskActError(
+                    "The original Notepad window changed while Save As appeared".into(),
+                ));
+            }
+            let matching: Vec<_> = windows
+                .into_iter()
+                .filter(|window| {
+                    window.id != original.id
+                        && window.title.eq_ignore_ascii_case("Save as")
+                        && window.accessible
+                        && !window.minimized
+                        && window.pid == original.pid
+                })
+                .collect();
+            return match matching.as_slice() {
+                [window] => Ok(window.clone()),
+                _ => Err(DeskActError(format!(
+                    "Expected one accessible Save As dialog owned by Notepad; found {}",
+                    matching.len()
+                ))),
+            };
+        }
+        if windows.len() != 1
+            || windows[0].id != original.id
+            || windows[0].pid != original.pid
+            || !windows[0].accessible
+            || windows[0].minimized
+        {
+            return Err(DeskActError(
+                "Unexpected Notepad window state while waiting for Save As".into(),
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(DeskActError(
+                "Save As dialog did not appear before the readiness deadline".into(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(100));
     }
 }
 
