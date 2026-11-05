@@ -47,7 +47,7 @@ This download is separate from npm installation. Planned Phase 3 browser support
 
 ## Phase 1 developer harness
 
-The developer-only Rust harness checks the user-installed native CLI and lists currently running GUI apps. It does not install tools, control apps, or list every application installed on Windows.
+The developer-only Rust harness checks the user-installed native CLI, discovers app entries from Start Menu shortcuts and registered App Paths, and lists currently running GUI apps. It does not install tools or control apps. Discovery reflects these Windows sources; it is not a claim that every installed application exposes usable accessibility controls.
 
 From a Rust development environment on Windows, run from the repository root:
 
@@ -56,7 +56,7 @@ cargo run --manifest-path src-tauri/Cargo.toml -- preflight
 cargo run --manifest-path src-tauri/Cargo.toml -- inventory
 ```
 
-The native CLI must be installed separately as described above. For a non-default npm installation, set `DESKACT_AGENT_DESKTOP` to the underlying executable path; do not point it at a PowerShell script or shell wrapper. The harness reports the app names, process IDs, and presentation state returned by `agent-desktop`.
+The native CLI must be installed separately as described above. For a non-default npm installation, set `DESKACT_AGENT_DESKTOP` to the underlying executable path; do not point it at a PowerShell script or shell wrapper. Set `DESKACT_POWERSHELL` only when PowerShell is not discoverable by its default executable name. The harness reports discovered app names, targets, and sources, plus running app names, process IDs, and presentation state returned by `agent-desktop`.
 
 ## License
 
