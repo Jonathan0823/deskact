@@ -82,6 +82,18 @@ impl VerifiedNativeCli {
                 data.version, SUPPORTED_AGENT_DESKTOP_VERSION
             )));
         }
+        if !data.os.eq_ignore_ascii_case("windows") {
+            return Err(DeskActError(format!(
+                "agent-desktop reports platform `{}`; DeskAct native control requires Windows x86_64.",
+                data.os
+            )));
+        }
+        if data.target != "x86_64" {
+            return Err(DeskActError(format!(
+                "agent-desktop reports target `{}`; DeskAct native control requires x86_64.",
+                data.target
+            )));
+        }
 
         Ok(Self {
             executable,
@@ -135,6 +147,8 @@ struct Envelope<T> {
 #[derive(Deserialize)]
 struct VersionData {
     version: String,
+    os: String,
+    target: String,
 }
 
 #[derive(Deserialize)]

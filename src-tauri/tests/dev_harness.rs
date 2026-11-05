@@ -120,6 +120,34 @@ fn preflight_rejects_an_incompatible_tool_version_with_setup_guidance() {
 }
 
 #[test]
+fn preflight_rejects_a_cli_reporting_a_non_windows_platform() {
+    let fake = FakeAgentDesktop::new(
+        r#"{"version":"2.6","ok":true,"command":"version","data":{"os":"linux","target":"x86_64","version":"1.1.0"}}"#,
+        r#"{"version":"2.6","ok":true,"command":"list-apps","data":{"apps":[]}}"#,
+    );
+
+    let output = run_harness(&fake, "preflight");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(stderr.contains("requires Windows"), "{stderr}");
+}
+
+#[test]
+fn preflight_rejects_an_unsupported_cli_architecture() {
+    let fake = FakeAgentDesktop::new(
+        r#"{"version":"2.6","ok":true,"command":"version","data":{"os":"windows","target":"arm64","version":"1.1.0"}}"#,
+        r#"{"version":"2.6","ok":true,"command":"list-apps","data":{"apps":[]}}"#,
+    );
+
+    let output = run_harness(&fake, "preflight");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(stderr.contains("requires x86_64"), "{stderr}");
+}
+
+#[test]
 fn preflight_rejects_an_incompatible_json_contract() {
     let fake = FakeAgentDesktop::new(
         r#"{"version":"2.7","ok":true,"command":"version","data":{"os":"windows","target":"x86_64","version":"1.1.0"}}"#,
