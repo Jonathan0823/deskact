@@ -167,3 +167,41 @@ pub fn discover_app_catalog() -> Result<CatalogDiscovery, DeskActError> {
         skipped_start_menu_shortcuts: response.skipped_start_menu_shortcuts,
     })
 }
+
+/// Read the current executable image path for a window owner PID.
+///
+/// The path is obtained from a fresh Windows process query, not inferred from the app label or launch result.
+/// If the OS cannot provide it (including hosted-app/container cases), resolution fails closed.
+pub fn process_image_path(pid: u32) -> Result<String, DeskActError> {
+    let powershell = env::var_os("DESKACT_POWERSHELL").unwrap_or_else(|| "powershell.exe".into());
+    let script = format!(
+        "$process = Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId = {pid}' -ErrorAction Stop; if ($null -eq $process -or [string]::IsNullOrWhiteSpace($process.ExecutablePath)) {{ exit 2 }}; [Console]::WriteLine($process.ExecutablePath)"
+    );
+    let mut command = Command::new(&powershell);
+    command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    let output = match run_command_with_timeout(&mut command, NATIVE_PROCESS_TIMEOUT) {
+        Ok(output) => output,
+        Err(CommandRunError::TimedOut) => {
+            return Err(DeskActError::new(format!(
+                "Could not determine the executable path for window owner PID {pid} before the process-query deadline. The app may be hosted; no window was selected."
+            )));
+        }
+        Err(CommandRunError::Io(error)) => {
+            return Err(DeskActError::new(format!(
+                "Could not query the executable path for window owner PID {pid}: {error}. No window was selected."
+            )));
+        }
+    };
+    if !output.status.success() {
+        return Err(DeskActError::new(format!(
+            "Could not determine the executable path for window owner PID {pid}. The app may be hosted by a container process; no window was selected."
+        )));
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if path.is_empty() {
+        return Err(DeskActError::new(format!(
+            "Windows returned no executable path for window owner PID {pid}. The app may be hosted; no window was selected."
+        )));
+    }
+    Ok(path)
+}

@@ -13,7 +13,9 @@ use std::{
 use serde::Deserialize;
 
 mod windows_catalog;
-pub use windows_catalog::{CatalogDiscovery, DiscoveredApp, DiscoverySource, discover_app_catalog};
+pub use windows_catalog::{
+    CatalogDiscovery, DiscoveredApp, DiscoverySource, discover_app_catalog, process_image_path,
+};
 
 /// Exact `agent-desktop` release required for native CLI operations.
 pub const SUPPORTED_AGENT_DESKTOP_VERSION: &str = "1.1.0";
@@ -21,6 +23,8 @@ pub const SUPPORTED_AGENT_DESKTOP_VERSION: &str = "1.1.0";
 pub const SUPPORTED_JSON_CONTRACT_VERSION: &str = "2.6";
 const INSTALL_GUIDANCE: &str = "Install the required version from Windows PowerShell with `npm install --global agent-desktop@1.1.0`; DeskAct never installs or updates automation tools.";
 pub(crate) const NATIVE_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum time to wait after activation for the target window to become enumerable.
+pub const APP_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Failure to start a subprocess or complete it before the native-operation deadline.
 #[derive(Debug)]
@@ -78,13 +82,20 @@ pub struct ResolvedNativeTarget {
 /// Window returned by `agent-desktop list-windows`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct NativeWindow {
+    /// Stable window identifier from the fresh window inventory.
     pub id: String,
+    /// Visible window title reported by the native automation tool.
     pub title: String,
+    /// Process/app label reported for the window; not proof of executable ownership.
     pub app_name: String,
+    /// Whether the window exposes semantic accessibility controls.
     pub accessible: bool,
+    /// Whether the window is currently minimized.
     pub minimized: bool,
+    /// Whether the window is visible, when reported by the CLI.
     #[serde(default)]
     pub visible: bool,
+    /// Current operating-system process id reported for the window.
     #[serde(default)]
     pub pid: u32,
 }
@@ -92,9 +103,13 @@ pub struct NativeWindow {
 /// Resolution may pause so the user can manually restore a minimized window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeTargetResolution {
+    /// A uniquely matched, owner-verified accessible window has a complete snapshot.
     Ready(ResolvedNativeTarget),
+    /// The user must restore the selected window manually before resolution can continue.
     NeedsManualRestore {
+        /// The selected discovered app entry.
         app: DiscoveredApp,
+        /// The minimized window to restore.
         window: NativeWindow,
     },
 }
@@ -209,14 +224,25 @@ impl VerifiedNativeCli {
         run_agent_desktop(&self.executable, command)
     }
 
+    /// Invoke a native CLI subcommand with the standard native-process timeout.
     fn invoke_args(&self, args: &[&str], command_name: &str) -> Result<Output, DeskActError> {
+        self.invoke_args_with_timeout(args, command_name, NATIVE_PROCESS_TIMEOUT)
+    }
+
+    /// Invoke a native CLI subcommand with a caller-provided hard deadline.
+    fn invoke_args_with_timeout(
+        &self,
+        args: &[&str],
+        command_name: &str,
+        timeout: Duration,
+    ) -> Result<Output, DeskActError> {
         let mut command = Command::new(&self.executable);
         command.args(args);
-        match run_command_with_timeout(&mut command, NATIVE_PROCESS_TIMEOUT) {
+        match run_command_with_timeout(&mut command, timeout) {
             Ok(output) => Ok(output),
             Err(CommandRunError::TimedOut) => Err(DeskActError(format!(
-                "agent-desktop `{command_name}` timed out after {} seconds",
-                NATIVE_PROCESS_TIMEOUT.as_secs()
+                "agent-desktop `{command_name}` timed out after {} milliseconds",
+                timeout.as_millis()
             ))),
             Err(CommandRunError::Io(error)) => Err(DeskActError(format!(
                 "Could not start agent-desktop `{command_name}`: {error}. {INSTALL_GUIDANCE}"
@@ -259,7 +285,7 @@ impl VerifiedNativeCli {
         if !launch.ok {
             return Err(cli_error("launch", launch.error));
         }
-        self.resolve_window_state(app)
+        self.resolve_window_state(app, Some(Instant::now() + APP_READINESS_TIMEOUT))
     }
 
     /// Resume after the user restores a minimized app; never relaunches it.
@@ -267,38 +293,64 @@ impl VerifiedNativeCli {
         &self,
         app: DiscoveredApp,
     ) -> Result<NativeTargetResolution, DeskActError> {
-        self.resolve_window_state(app)
+        self.resolve_window_state(app, None)
     }
 
+    /// Re-enumerate windows and resolve one owner-verified accessible target.
     fn resolve_window_state(
         &self,
         app: DiscoveredApp,
+        readiness_deadline: Option<Instant>,
     ) -> Result<NativeTargetResolution, DeskActError> {
-        let output = self.invoke("list-windows")?;
-        let envelope: Envelope<Vec<NativeWindow>> = parse_envelope(&output, "list-windows")?;
-        if envelope.version != SUPPORTED_JSON_CONTRACT_VERSION {
-            return Err(DeskActError(format!(
-                "Unsupported agent-desktop JSON contract {} in window inventory (DeskAct requires {}).",
-                envelope.version, SUPPORTED_JSON_CONTRACT_VERSION
-            )));
-        }
-        if !envelope.ok {
-            return Err(cli_error("list-windows", envelope.error));
-        }
-        let windows = envelope.data.ok_or_else(|| {
-            DeskActError("agent-desktop window inventory did not include data".into())
-        })?;
         let expected_process = executable_stem(&app.target);
-        let matching: Vec<_> = windows
-            .into_iter()
-            .filter(|window| window.app_name.eq_ignore_ascii_case(&expected_process))
-            .collect();
-        if matching.is_empty() {
-            return Err(DeskActError(format!(
-                "No fresh window matched `{}` (target process `{expected_process}`) after launch. No window was selected.",
-                app.name
-            )));
-        }
+        let mut backoff = Duration::from_millis(100);
+        let matching = loop {
+            let output = if let Some(deadline) = readiness_deadline {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(no_matching_window_error(&app, &expected_process));
+                }
+                let timeout_ms = remaining.as_millis().max(1).to_string();
+                self.invoke_args_with_timeout(
+                    &["list-windows", "--timeout-ms", &timeout_ms],
+                    "list-windows",
+                    remaining,
+                )?
+            } else {
+                self.invoke("list-windows")?
+            };
+            let envelope: Envelope<Vec<NativeWindow>> = parse_envelope(&output, "list-windows")?;
+            if envelope.version != SUPPORTED_JSON_CONTRACT_VERSION {
+                return Err(DeskActError(format!(
+                    "Unsupported agent-desktop JSON contract {} in window inventory (DeskAct requires {}).",
+                    envelope.version, SUPPORTED_JSON_CONTRACT_VERSION
+                )));
+            }
+            if !envelope.ok {
+                return Err(cli_error("list-windows", envelope.error));
+            }
+            let windows = envelope.data.ok_or_else(|| {
+                DeskActError("agent-desktop window inventory did not include data".into())
+            })?;
+            let matching: Vec<_> = windows
+                .into_iter()
+                .filter(|window| {
+                    executable_stem(&window.app_name).eq_ignore_ascii_case(&expected_process)
+                })
+                .collect();
+            if !matching.is_empty() {
+                break matching;
+            }
+            let Some(deadline) = readiness_deadline else {
+                return Err(no_matching_window_error(&app, &expected_process));
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(no_matching_window_error(&app, &expected_process));
+            }
+            thread::sleep(backoff.min(remaining));
+            backoff = (backoff * 2).min(Duration::from_secs(1));
+        };
         let accessible: Vec<_> = matching
             .into_iter()
             .filter(|window| window.accessible)
@@ -309,17 +361,37 @@ impl VerifiedNativeCli {
                 app.name
             )));
         }
-        if accessible.len() != 1 {
+        let mut owner_verified = Vec::new();
+        for window in accessible {
+            if window.pid == 0 {
+                return Err(DeskActError(format!(
+                    "The owner PID for window `{}` could not be determined. Hosted-app ownership cannot be verified; no window was selected.",
+                    window.id
+                )));
+            }
+            let image_path = process_image_path(window.pid)?;
+            if !windows_paths_equal(&image_path, &app.target) {
+                continue;
+            }
+            owner_verified.push(window);
+        }
+        if owner_verified.is_empty() {
             return Err(DeskActError(format!(
-                "Found {} accessible windows matching `{}`; exactly one is required. No window was selected.",
-                accessible.len(),
-                app.name
+                "No accessible `{}` window has an owner executable matching `{}`. A hosted-app/container window may report its host process; ownership could not be verified, so no window was selected.",
+                app.name, app.target
             )));
         }
-        let window = accessible
+        if owner_verified.len() != 1 {
+            return Err(DeskActError(format!(
+                "Found {} accessible windows owned by `{}`; exactly one is required. No window was selected.",
+                owner_verified.len(),
+                app.target
+            )));
+        }
+        let window = owner_verified
             .into_iter()
             .next()
-            .expect("one accessible window");
+            .expect("one verified owner");
         if window.minimized {
             return Ok(NativeTargetResolution::NeedsManualRestore { app, window });
         }
@@ -391,6 +463,25 @@ impl VerifiedNativeCli {
     }
 }
 
+/// Explain that no fresh window could be associated with the requested app before timeout.
+fn no_matching_window_error(app: &DiscoveredApp, expected_process: &str) -> DeskActError {
+    DeskActError(format!(
+        "No fresh window matched `{}` (target process `{expected_process}`) before the app-readiness deadline. Hosted-app windows may expose only their container process; ownership could not be verified, so no window was selected.",
+        app.name
+    ))
+}
+
+/// Compare Windows executable paths using their case-insensitive, separator-insensitive form.
+fn windows_paths_equal(left: &str, right: &str) -> bool {
+    fn normalize(path: &str) -> String {
+        let path = path.trim().trim_matches('"').replace('/', "\\");
+        path.strip_prefix("\\\\?\\").unwrap_or(&path).to_lowercase()
+    }
+
+    normalize(left) == normalize(right)
+}
+
+/// Extract a target's file stem for a preliminary process-label filter.
 fn executable_stem(target: &str) -> String {
     let file_name = target.rsplit(['\\', '/']).next().unwrap_or(target);
     file_name
@@ -450,7 +541,7 @@ pub fn resolve_native_target(app_name: &str) -> Result<NativeTargetResolution, D
     let catalog = normalize_catalog(discovery.entries);
     let matches: Vec<_> = catalog
         .into_iter()
-        .filter(|app| app.name.eq_ignore_ascii_case(app_name.trim()))
+        .filter(|app| app.name.to_lowercase() == app_name.trim().to_lowercase())
         .collect();
     let app = match matches.as_slice() {
         [] => {
@@ -470,18 +561,23 @@ pub fn resolve_native_target(app_name: &str) -> Result<NativeTargetResolution, D
     cli.resolve_target(app)
 }
 
+/// Sort and remove only catalog entries with identical launch configuration.
 fn normalize_catalog(mut catalog: Vec<DiscoveredApp>) -> Vec<DiscoveredApp> {
     catalog.sort_by_key(|app| {
         (
             app.name.to_lowercase(),
             app.target.to_lowercase(),
             app.arguments.clone(),
+            app.working_directory.to_lowercase(),
         )
     });
     catalog.dedup_by(|left, right| {
         left.name.eq_ignore_ascii_case(&right.name)
             && left.target.eq_ignore_ascii_case(&right.target)
             && left.arguments == right.arguments
+            && left
+                .working_directory
+                .eq_ignore_ascii_case(&right.working_directory)
     });
     catalog
 }

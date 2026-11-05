@@ -10,6 +10,7 @@ use deskact_core::{
     NativeTargetResolution, VerifiedNativeCli, native_inventory, preflight, resolve_native_target,
 };
 
+/// Run the developer-only native preflight, inventory, or target-resolution command.
 fn main() -> ExitCode {
     let command = env::args().nth(1);
     match command.as_deref() {
@@ -23,16 +24,19 @@ fn main() -> ExitCode {
             }
             Err(error) => fail(error.to_string()),
         },
-        Some("resolve") => match env::args().nth(2) {
-            Some(app_name) => match resolve_native_target(&app_name) {
-                Ok(resolution) => finish_resolution(resolution),
-                Err(error) => fail(error.to_string()),
-            },
-            None => {
-                eprintln!("Usage: deskact-dev resolve <discovered-app-name>");
-                ExitCode::from(2)
+        Some("resolve") => {
+            let mut arguments = env::args().skip(2);
+            match (arguments.next(), arguments.next()) {
+                (Some(app_name), None) => match resolve_native_target(&app_name) {
+                    Ok(resolution) => finish_resolution(resolution),
+                    Err(error) => fail(error.to_string()),
+                },
+                _ => {
+                    eprintln!("Usage: deskact-dev resolve <discovered-app-name>");
+                    ExitCode::from(2)
+                }
             }
-        },
+        }
         Some("inventory") => match native_inventory() {
             Ok(inventory) => {
                 println!(
@@ -70,6 +74,7 @@ fn main() -> ExitCode {
     }
 }
 
+/// Present a resolved target or pause for manual restoration and then resume resolution.
 fn finish_resolution(mut resolution: NativeTargetResolution) -> ExitCode {
     loop {
         match resolution {
@@ -112,6 +117,7 @@ fn finish_resolution(mut resolution: NativeTargetResolution) -> ExitCode {
     }
 }
 
+/// Print an actionable harness error and return a non-success exit code.
 fn fail(message: String) -> ExitCode {
     eprintln!("Native desktop capability unavailable: {message}");
     ExitCode::from(1)
