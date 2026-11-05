@@ -8,9 +8,10 @@ use std::{
 
 use deskact_core::{
     NativeTargetResolution, VerifiedNativeCli, native_inventory, preflight, resolve_native_target,
+    run_notepad_acceptance,
 };
 
-/// Run the developer-only native preflight, inventory, or target-resolution command.
+/// Run the developer-only native preflight, inventory, target-resolution, or acceptance command.
 fn main() -> ExitCode {
     let command = env::args().nth(1);
     match command.as_deref() {
@@ -33,6 +34,40 @@ fn main() -> ExitCode {
                 },
                 _ => {
                     eprintln!("Usage: deskact-dev resolve <discovered-app-name>");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Some("notepad-acceptance") => {
+            let arguments: Vec<_> = env::args().skip(2).collect();
+            let runs = match arguments.as_slice() {
+                [] => Some(20),
+                [flag, count] if flag == "--runs" => count.parse::<usize>().ok(),
+                _ => None,
+            };
+            match runs {
+                Some(runs) => match run_notepad_acceptance(runs) {
+                    Ok(report) => {
+                        if report.gate_met {
+                            println!(
+                                "Controlled Notepad acceptance verified {}/{} runs (19/20 gate met).",
+                                report.verified, report.attempted
+                            );
+                        } else {
+                            println!(
+                                "Controlled Notepad smoke run verified {}/{} runs; the 19/20 acceptance gate was not assessed.",
+                                report.verified, report.attempted
+                            );
+                        }
+                        for failure in report.failures {
+                            eprintln!("Unverified: {failure}");
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => fail(error.to_string()),
+                },
+                None => {
+                    eprintln!("Usage: deskact-dev notepad-acceptance [--runs <count>]");
                     ExitCode::from(2)
                 }
             }
@@ -68,7 +103,9 @@ fn main() -> ExitCode {
         },
 
         _ => {
-            eprintln!("Usage: deskact-dev <preflight|inventory|resolve <discovered-app-name>>");
+            eprintln!(
+                "Usage: deskact-dev <preflight|inventory|resolve <discovered-app-name>|notepad-acceptance [--runs <count>]>"
+            );
             ExitCode::from(2)
         }
     }

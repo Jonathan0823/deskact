@@ -1,11 +1,13 @@
-//! Read-only native CLI preflight and Windows application inventory for DeskAct.
+//! Native CLI preflight, Windows application inventory, and controlled developer acceptance workflows for DeskAct.
 
 use std::{
     env,
     ffi::{OsStr, OsString},
-    fmt,
+    fmt, fs,
     io::{self, Read},
+    path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -195,6 +197,24 @@ impl VerifiedNativeCli {
     /// Return the compatibility information verified when this connection was created.
     pub fn preflight_status(&self) -> &PreflightStatus {
         &self.preflight
+    }
+
+    /// List fresh windows matching an app label using the verified CLI connection.
+    fn windows_for_app(&self, app: &str) -> Result<Vec<NativeWindow>, DeskActError> {
+        let output = self.invoke_args(&["list-windows", "--app", app], "list-windows")?;
+        let envelope: Envelope<Vec<NativeWindow>> = parse_envelope(&output, "list-windows")?;
+        if envelope.version != SUPPORTED_JSON_CONTRACT_VERSION {
+            return Err(DeskActError(format!(
+                "Unsupported agent-desktop JSON contract {} in window inventory (DeskAct requires {}).",
+                envelope.version, SUPPORTED_JSON_CONTRACT_VERSION
+            )));
+        }
+        if !envelope.ok {
+            return Err(cli_error("list-windows", envelope.error));
+        }
+        envelope.data.ok_or_else(|| {
+            DeskActError("agent-desktop window inventory did not include data".into())
+        })
     }
 
     /// List running GUI applications using this preflight-verified CLI connection.
@@ -534,6 +554,671 @@ pub fn native_inventory() -> Result<NativeInventory, DeskActError> {
     })
 }
 
+/// Run controlled Notepad acceptance scenarios in isolated, newly created tabs.
+pub fn run_notepad_acceptance(runs: usize) -> Result<NotepadAcceptanceReport, DeskActError> {
+    if runs == 0 {
+        return Err(DeskActError(
+            "The Notepad acceptance run count must be greater than zero".into(),
+        ));
+    }
+    let cli = VerifiedNativeCli::connect()?;
+    let mut failures = Vec::new();
+    let mut attempted = 0;
+    let mut verified = 0;
+    for run in 1..=runs {
+        attempted += 1;
+        match run_notepad_scenario(&cli, run) {
+            Ok(()) => verified += 1,
+            Err(failure) => {
+                failures.push(format!("run {run}: {}", failure.error));
+                if !failure.safe_to_continue {
+                    break;
+                }
+            }
+        }
+    }
+    let required = required_successes(runs);
+    if verified < required {
+        return Err(DeskActError(format!(
+            "Notepad acceptance verified {verified}/{attempted} attempted runs ({runs} requested); {required} verified runs are required. Failures: {}",
+            failures.join("; ")
+        )));
+    }
+    Ok(NotepadAcceptanceReport {
+        attempted,
+        verified,
+        gate_met: runs >= 20 && verified >= required,
+        failures,
+    })
+}
+
+fn required_successes(runs: usize) -> usize {
+    (runs / 100) * 95 + (runs % 100 * 95).div_ceil(100)
+}
+
+/// Per-run evidence summary for the controlled Notepad acceptance command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotepadAcceptanceReport {
+    /// Number of scenarios attempted.
+    pub attempted: usize,
+    /// Number of scenarios independently verified end to end.
+    pub verified: usize,
+    /// Whether the 20-run, 95% acceptance gate was met.
+    pub gate_met: bool,
+    /// Diagnostics for scenarios that did not verify.
+    pub failures: Vec<String>,
+}
+
+static ACCEPTANCE_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct AcceptanceArtifacts {
+    directory: PathBuf,
+    file: PathBuf,
+}
+
+impl AcceptanceArtifacts {
+    fn create(run: usize) -> Result<Self, DeskActError> {
+        for _ in 0..100 {
+            let counter = ACCEPTANCE_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let unique_id = format!(
+                "{}-{}-{run}-{counter}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            );
+            let directory = env::temp_dir().join(format!("deskact-notepad-{unique_id}"));
+            match fs::create_dir(&directory) {
+                Ok(()) => {
+                    let file = directory.join(format!("deskact-marker-{unique_id}.txt"));
+                    return Ok(Self { directory, file });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(DeskActError(format!(
+                        "Could not create a unique Notepad acceptance directory: {error}"
+                    )));
+                }
+            }
+        }
+        Err(DeskActError(
+            "Could not allocate a unique Notepad acceptance directory after 100 attempts".into(),
+        ))
+    }
+}
+
+impl AcceptanceArtifacts {
+    fn cleanup(self) -> Result<(), DeskActError> {
+        match fs::remove_file(&self.file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(DeskActError(format!(
+                    "Could not remove the test-created Notepad acceptance file: {error}"
+                )));
+            }
+        }
+        match fs::remove_dir(&self.directory) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(DeskActError(format!(
+                "Could not remove the unique Notepad acceptance directory: {error}"
+            ))),
+        }
+    }
+}
+
+impl Drop for AcceptanceArtifacts {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.file);
+        let _ = fs::remove_dir(&self.directory);
+    }
+}
+
+struct ScenarioFailure {
+    error: DeskActError,
+    safe_to_continue: bool,
+}
+
+fn run_notepad_scenario(cli: &VerifiedNativeCli, run: usize) -> Result<(), ScenarioFailure> {
+    let mut ui_may_have_changed = false;
+    run_notepad_scenario_inner(cli, run, &mut ui_may_have_changed).map_err(|error| {
+        ScenarioFailure {
+            error,
+            safe_to_continue: !ui_may_have_changed,
+        }
+    })
+}
+
+fn run_notepad_scenario_inner(
+    cli: &VerifiedNativeCli,
+    run: usize,
+    ui_may_have_changed: &mut bool,
+) -> Result<(), DeskActError> {
+    let catalog = normalize_catalog(windows_catalog::discover_app_catalog()?.entries);
+    let apps: Vec<_> = catalog
+        .into_iter()
+        .filter(|app| app.name.eq_ignore_ascii_case("notepad"))
+        .collect();
+    let app = match apps.as_slice() {
+        [app] => app,
+        [] => {
+            return Err(DeskActError(
+                "No uniquely discovered Notepad executable is available".into(),
+            ));
+        }
+        _ => {
+            return Err(DeskActError(
+                "Multiple Notepad launch targets were discovered; no window was selected".into(),
+            ));
+        }
+    };
+    let windows = cli.windows_for_app("notepad")?;
+    if windows.len() != 1 {
+        return Err(DeskActError(format!(
+            "Expected exactly one existing Notepad window; found {}. No document was opened or modified.",
+            windows.len()
+        )));
+    }
+    let original = windows.into_iter().next().expect("one window checked");
+    if !original.accessible || original.minimized {
+        return Err(DeskActError(format!(
+            "Notepad window `{}` is inaccessible or minimized; no action was taken.",
+            original.id
+        )));
+    }
+    if original.title.eq_ignore_ascii_case("Untitled - Notepad") {
+        return Err(DeskActError(
+            "The existing active Notepad tab is already titled `Untitled - Notepad`, so a fresh Ctrl+N tab cannot be distinguished safely; no action was taken.".into(),
+        ));
+    }
+    if original.pid == 0 {
+        return Err(DeskActError(format!(
+            "Notepad window `{}` has no verifiable owner PID; no action was taken.",
+            original.id
+        )));
+    }
+    let owner_path = process_image_path(original.pid)?;
+    if !windows_paths_equal(&owner_path, &app.target) {
+        return Err(DeskActError(format!(
+            "Notepad window `{}` is not owned by the uniquely discovered Notepad executable; no action was taken.",
+            original.id
+        )));
+    }
+
+    let artifacts = AcceptanceArtifacts::create(run)?;
+    let marker = "DESKACT_NOTEPAD_ACCEPTANCE_MARKER".to_owned();
+    let filename = artifacts
+        .file
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| DeskActError("The unique acceptance filename is not valid Unicode".into()))?
+        .to_owned();
+    *ui_may_have_changed = true;
+    press_shortcut(cli, &original, "ctrl+n")?;
+    let new_tab = unique_window_for_id(cli, &original)?;
+    if !new_tab.title.eq_ignore_ascii_case("Untitled - Notepad") {
+        return Err(DeskActError(format!(
+            "Ctrl+N did not produce the expected fresh `Untitled - Notepad` tab (observed `{}`). It was not closed.",
+            new_tab.title
+        )));
+    }
+    let editor_snapshot = fresh_snapshot(cli, &new_tab)?;
+    let editor = unique_control(&editor_snapshot, "textfield", None, "new-tab editor")?;
+    let editor_ref = control_ref(editor)?;
+    let initial_value = invoke_value(cli, &["get", editor_ref, "--property", "value"], "get")?;
+    if initial_value.as_str() != Some("") {
+        return Err(DeskActError(
+            "Fresh Notepad tab was not independently verified empty; no text was changed".into(),
+        ));
+    }
+    invoke_success(cli, &["set-value", editor_ref, &marker], "set-value")?;
+
+    press_shortcut(cli, &new_tab, "ctrl+s")?;
+    let dialog = unique_save_dialog(cli, &original)?;
+    let save_snapshot = fresh_snapshot(cli, &dialog)?;
+    let filename_field = unique_control(
+        &save_snapshot,
+        "textfield",
+        Some("File name:"),
+        "Save As filename field",
+    )?;
+    let filename_ref = control_ref(filename_field)?;
+    let full_path = artifacts.file.to_str().ok_or_else(|| {
+        DeskActError(
+            "The unique acceptance path is not valid Unicode; no save was attempted".into(),
+        )
+    })?;
+    invoke_success(cli, &["set-value", filename_ref, full_path], "set-value")?;
+
+    let save_snapshot = fresh_snapshot(cli, &dialog)?;
+    let filename_field = unique_control(
+        &save_snapshot,
+        "textfield",
+        Some("File name:"),
+        "Save As filename field",
+    )?;
+    if filename_field
+        .get("value")
+        .and_then(serde_json::Value::as_str)
+        != Some(full_path)
+    {
+        return Err(DeskActError(
+            "Fresh Save As observation did not confirm the unique output path; nothing was saved"
+                .into(),
+        ));
+    }
+    let save_button = unique_control(&save_snapshot, "button", Some("Save"), "Save button")?;
+    let save_ref = control_ref(save_button)?;
+    invoke_success(cli, &["click", save_ref], "click")?;
+    match wait_for_saved_contents(
+        cli,
+        &original,
+        &dialog,
+        &artifacts.file,
+        &marker,
+        Duration::from_secs(2),
+    )? {
+        SaveStatus::Saved => {}
+        SaveStatus::DialogStillOpen => {
+            if fs::symlink_metadata(&artifacts.file).is_ok() {
+                let contents = fs::read_to_string(&artifacts.file).map_err(|error| {
+                    DeskActError(format!(
+                        "Saved acceptance file could not be read independently: {error}"
+                    ))
+                })?;
+                if contents != marker {
+                    return Err(DeskActError(
+                        "The unique acceptance path appeared with unexpected contents; no second save was attempted".into(),
+                    ));
+                }
+                if wait_for_saved_contents(
+                    cli,
+                    &original,
+                    &dialog,
+                    &artifacts.file,
+                    &marker,
+                    Duration::from_secs(5),
+                )? != SaveStatus::Saved
+                {
+                    return Err(DeskActError(
+                        "The verified file was saved, but the Save As dialog did not close".into(),
+                    ));
+                }
+            } else {
+                let save_snapshot = fresh_snapshot(cli, &dialog)?;
+                let filename_field = unique_control(
+                    &save_snapshot,
+                    "textfield",
+                    Some("File name:"),
+                    "Save As filename field",
+                )?;
+                if filename_field
+                    .get("value")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(full_path)
+                {
+                    return Err(DeskActError(
+                        "Save As no longer points to the unique output path; no retry was attempted"
+                            .into(),
+                    ));
+                }
+                let save_button =
+                    unique_control(&save_snapshot, "button", Some("Save"), "Save button")?;
+                invoke_success(cli, &["click", control_ref(save_button)?], "click")?;
+                if wait_for_saved_contents(
+                    cli,
+                    &original,
+                    &dialog,
+                    &artifacts.file,
+                    &marker,
+                    Duration::from_secs(5),
+                )? != SaveStatus::Saved
+                {
+                    return Err(DeskActError(
+                        "Save As remained open after one observed retry".into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    let saved_window = unique_window_for_id(cli, &original)?;
+    let saved_title = format!("{filename} - Notepad");
+    if !saved_window.title.eq_ignore_ascii_case(&saved_title) {
+        return Err(DeskActError(format!(
+            "Saved test-tab identity was not confirmed by its exact unique filename (expected `{saved_title}`, observed `{}`). The tab was not closed.",
+            saved_window.title
+        )));
+    }
+    let saved_snapshot = fresh_snapshot(cli, &saved_window)?;
+    let editor = unique_control(&saved_snapshot, "textfield", None, "saved editor")?;
+    let editor_ref = control_ref(editor)?;
+    let editor_value = invoke_value(cli, &["get", editor_ref, "--property", "value"], "get")?;
+    if editor_value.as_str() != Some(marker.as_str()) {
+        return Err(DeskActError(
+            "Fresh accessibility readback did not exactly match the fixed marker".into(),
+        ));
+    }
+
+    press_shortcut(cli, &saved_window, "ctrl+w")?;
+    let after_close = unique_window_for_id(cli, &original)?;
+    if after_close.title != original.title {
+        return Err(DeskActError(format!(
+            "After closing the verified test tab, Notepad did not return to the original window title `{}` (observed `{}`).",
+            original.title, after_close.title
+        )));
+    }
+    artifacts.cleanup()?;
+    *ui_may_have_changed = false;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveStatus {
+    Saved,
+    DialogStillOpen,
+}
+
+fn wait_for_saved_contents(
+    cli: &VerifiedNativeCli,
+    original: &NativeWindow,
+    dialog: &NativeWindow,
+    path: &Path,
+    marker: &str,
+    timeout: Duration,
+) -> Result<SaveStatus, DeskActError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let file_exists = match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => true,
+            Ok(_) => {
+                return Err(DeskActError(
+                    "The acceptance output path is not a regular file".into(),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(DeskActError(format!(
+                    "Could not inspect the unique acceptance output: {error}"
+                )));
+            }
+        };
+        let contents_match = if file_exists {
+            match fs::read_to_string(path) {
+                Ok(contents) => contents == marker,
+                Err(error) => {
+                    return Err(DeskActError(format!(
+                        "Saved acceptance file could not be read independently: {error}"
+                    )));
+                }
+            }
+        } else {
+            false
+        };
+        let windows = cli.windows_for_app("notepad")?;
+        let original_present = windows.iter().any(|window| {
+            window.id == original.id
+                && window.accessible
+                && !window.minimized
+                && window.pid == original.pid
+        });
+        let dialog_present = windows.iter().any(|window| {
+            window.id == dialog.id
+                && window.title.eq_ignore_ascii_case("Save as")
+                && window.accessible
+                && !window.minimized
+                && window.pid == original.pid
+        });
+        if !original_present
+            || (windows.len() == 1 && dialog_present)
+            || (windows.len() != 1 && windows.len() != 2)
+            || (windows.len() == 2 && !dialog_present)
+        {
+            return Err(DeskActError(
+                "Save As left an unexpected Notepad window state; no retry was attempted".into(),
+            ));
+        }
+        if contents_match && windows.len() == 1 {
+            return Ok(SaveStatus::Saved);
+        }
+        if Instant::now() >= deadline {
+            if dialog_present && (!file_exists || contents_match) {
+                return Ok(SaveStatus::DialogStillOpen);
+            }
+            return Err(if file_exists {
+                DeskActError(
+                    "Saved acceptance file contents did not exactly match the fixed marker".into(),
+                )
+            } else {
+                DeskActError(
+                    "Save As action did not produce the unique acceptance file before the verification deadline".into(),
+                )
+            });
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn press_shortcut(
+    cli: &VerifiedNativeCli,
+    window: &NativeWindow,
+    shortcut: &str,
+) -> Result<(), DeskActError> {
+    let args = [
+        "press",
+        "--headed",
+        "--app",
+        &window.app_name,
+        "--window-id",
+        &window.id,
+        shortcut,
+    ];
+    invoke_success(cli, &args, "press")?;
+    Ok(())
+}
+
+fn unique_window_for_id(
+    cli: &VerifiedNativeCli,
+    original: &NativeWindow,
+) -> Result<NativeWindow, DeskActError> {
+    let windows = cli.windows_for_app("notepad")?;
+    if windows.len() != 1 {
+        return Err(DeskActError(format!(
+            "Expected the selected Notepad window to remain unique; found {} windows",
+            windows.len()
+        )));
+    }
+    let matching: Vec<_> = windows
+        .into_iter()
+        .filter(|window| window.id == original.id)
+        .collect();
+    match matching.as_slice() {
+        [window] if window.accessible && !window.minimized && window.pid == original.pid => {
+            Ok(window.clone())
+        }
+        [] => Err(DeskActError(format!(
+            "The selected Notepad window `{}` disappeared",
+            original.id
+        ))),
+        _ => Err(DeskActError(format!(
+            "The selected Notepad window `{}` became ambiguous or unsafe",
+            original.id
+        ))),
+    }
+}
+
+fn unique_save_dialog(
+    cli: &VerifiedNativeCli,
+    original: &NativeWindow,
+) -> Result<NativeWindow, DeskActError> {
+    let windows = cli.windows_for_app("notepad")?;
+    if windows.len() != 2
+        || !windows.iter().any(|window| {
+            window.id == original.id
+                && window.accessible
+                && !window.minimized
+                && window.pid == original.pid
+        })
+    {
+        return Err(DeskActError(format!(
+            "Expected the original Notepad window and one Save As dialog; found {} windows",
+            windows.len()
+        )));
+    }
+    let matching: Vec<_> = windows
+        .into_iter()
+        .filter(|window| {
+            window.title.eq_ignore_ascii_case("Save as")
+                && window.accessible
+                && !window.minimized
+                && window.pid == original.pid
+        })
+        .collect();
+    match matching.as_slice() {
+        [window] => Ok(window.clone()),
+        _ => Err(DeskActError(format!(
+            "Expected one accessible Save As dialog owned by Notepad; found {}",
+            matching.len()
+        ))),
+    }
+}
+
+fn fresh_snapshot(
+    cli: &VerifiedNativeCli,
+    window: &NativeWindow,
+) -> Result<serde_json::Value, DeskActError> {
+    let output = cli.invoke_args(
+        &[
+            "snapshot",
+            "--app",
+            &window.app_name,
+            "--window-id",
+            &window.id,
+            "-i",
+        ],
+        "snapshot",
+    )?;
+    let data = successful_data(output, "snapshot")?;
+    if data
+        .pointer("/window/id")
+        .and_then(serde_json::Value::as_str)
+        != Some(&window.id)
+    {
+        return Err(DeskActError(format!(
+            "Snapshot did not confirm selected window `{}`",
+            window.id
+        )));
+    }
+    if data.get("complete").and_then(serde_json::Value::as_bool) != Some(true)
+        || data
+            .get("snapshot_id")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+        || data
+            .get("ref_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+            == 0
+    {
+        return Err(DeskActError(format!(
+            "Fresh snapshot for `{}` was incomplete or exposed no actionable controls",
+            window.title
+        )));
+    }
+    Ok(data)
+}
+
+fn unique_control<'a>(
+    snapshot: &'a serde_json::Value,
+    role: &str,
+    name: Option<&str>,
+    description: &str,
+) -> Result<&'a serde_json::Value, DeskActError> {
+    fn visit<'a>(
+        node: &'a serde_json::Value,
+        role: &str,
+        name: Option<&str>,
+        matches: &mut Vec<&'a serde_json::Value>,
+    ) {
+        if node.get("role").and_then(serde_json::Value::as_str) == Some(role)
+            && name.is_none_or(|expected| {
+                node.get("name").and_then(serde_json::Value::as_str) == Some(expected)
+            })
+            && node
+                .get("ref_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        {
+            matches.push(node);
+        }
+        if let Some(children) = node.get("children").and_then(serde_json::Value::as_array) {
+            for child in children {
+                visit(child, role, name, matches);
+            }
+        }
+    }
+    let mut matches = Vec::new();
+    if let Some(tree) = snapshot.get("tree") {
+        visit(tree, role, name, &mut matches);
+    }
+    match matches.as_slice() {
+        [control] => Ok(*control),
+        _ => Err(DeskActError(format!(
+            "Expected one unique {description}; found {}",
+            matches.len()
+        ))),
+    }
+}
+
+fn control_ref(control: &serde_json::Value) -> Result<&str, DeskActError> {
+    control
+        .get("ref_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| DeskActError("Accessibility control had no fresh ref".into()))
+}
+
+fn invoke_success(
+    cli: &VerifiedNativeCli,
+    args: &[&str],
+    command: &str,
+) -> Result<serde_json::Value, DeskActError> {
+    let output = cli.invoke_args(args, command)?;
+    successful_data(output, command)
+}
+
+fn invoke_value(
+    cli: &VerifiedNativeCli,
+    args: &[&str],
+    command: &str,
+) -> Result<serde_json::Value, DeskActError> {
+    let data = invoke_success(cli, args, command)?;
+    data.get("value").cloned().ok_or_else(|| {
+        DeskActError(format!(
+            "agent-desktop `{command}` result did not include a value"
+        ))
+    })
+}
+
+fn successful_data(output: Output, command: &str) -> Result<serde_json::Value, DeskActError> {
+    let envelope: Envelope<serde_json::Value> = parse_envelope(&output, command)?;
+    if envelope.version != SUPPORTED_JSON_CONTRACT_VERSION {
+        return Err(DeskActError(format!(
+            "Unsupported agent-desktop JSON contract {} in `{command}` response (DeskAct requires {}).",
+            envelope.version, SUPPORTED_JSON_CONTRACT_VERSION
+        )));
+    }
+    if !envelope.ok {
+        return Err(cli_error(command, envelope.error));
+    }
+    envelope.data.ok_or_else(|| {
+        DeskActError(format!(
+            "agent-desktop `{command}` response did not include data"
+        ))
+    })
+}
+
 /// Launch a uniquely named discovered app and resolve its fresh accessible window.
 pub fn resolve_native_target(app_name: &str) -> Result<NativeTargetResolution, DeskActError> {
     let cli = VerifiedNativeCli::connect()?;
@@ -725,6 +1410,17 @@ mod tests {
 
         assert!(matches!(result, Err(CommandRunError::TimedOut)));
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn notepad_acceptance_uses_a_ninety_five_percent_success_gate() {
+        assert_eq!(required_successes(20), 19);
+        assert_eq!(required_successes(1), 1);
+        assert_eq!(required_successes(100), 95);
+        assert_eq!(
+            required_successes(usize::MAX),
+            (usize::MAX / 100) * 95 + (usize::MAX % 100 * 95).div_ceil(100)
+        );
     }
 }
 
