@@ -27,7 +27,33 @@ pub struct RunningApp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeInventory {
     pub preflight: PreflightStatus,
-    pub apps: Vec<RunningApp>,
+    pub catalog: Vec<DiscoveredApp>,
+    pub running_apps: Vec<RunningApp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DiscoveredApp {
+    pub name: String,
+    pub target: String,
+    pub arguments: String,
+    pub working_directory: String,
+    pub source: DiscoverySource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiscoverySource {
+    StartMenu,
+    AppPaths,
+}
+
+impl fmt::Display for DiscoverySource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::StartMenu => "start-menu",
+            Self::AppPaths => "app-paths",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +85,61 @@ struct VersionData {
 struct AppInventory {
     apps: Vec<RunningApp>,
 }
+
+const WINDOWS_APP_DISCOVERY_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
+$OutputEncoding = [Console]::OutputEncoding
+try {
+    $entries = New-Object 'System.Collections.Generic.List[object]'
+    $shell = New-Object -ComObject WScript.Shell
+    $startMenuRoots = @(
+        [Environment]::GetFolderPath([System.Environment+SpecialFolder]::StartMenu),
+        [Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonStartMenu)
+    ) | Where-Object { $_ -and [System.IO.Directory]::Exists($_) }
+    foreach ($root in $startMenuRoots) {
+        Get-ChildItem -LiteralPath $root -Filter '*.lnk' -File -Recurse -ErrorAction Stop | ForEach-Object {
+            $shortcut = $shell.CreateShortcut($_.FullName)
+            if ($shortcut.TargetPath) {
+                $null = $entries.Add([PSCustomObject]@{
+                    name = [IO.Path]::GetFileNameWithoutExtension($_.Name)
+                    target = [string]$shortcut.TargetPath
+                    arguments = [string]$shortcut.Arguments
+                    working_directory = [string]$shortcut.WorkingDirectory
+                    source = 'start-menu'
+                })
+            }
+        }
+    }
+    $registeredRoots = @(
+        'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\App Paths',
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths',
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths'
+    )
+    foreach ($root in $registeredRoots) {
+        if (Test-Path -LiteralPath $root) {
+            Get-ChildItem -LiteralPath $root -ErrorAction Stop | ForEach-Object {
+                $key = Get-Item -LiteralPath $_.PSPath -ErrorAction Stop
+                $target = [string]$key.GetValue('')
+                if ($target) {
+                    $null = $entries.Add([PSCustomObject]@{
+                        name = [IO.Path]::GetFileNameWithoutExtension($_.PSChildName)
+                        target = $target
+                        arguments = ''
+                        working_directory = ''
+                        source = 'app-paths'
+                    })
+                }
+            }
+        }
+    }
+    $sorted = @($entries | Sort-Object name, target, arguments, source -Unique)
+    ConvertTo-Json -InputObject $sorted -Depth 4 -Compress
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+}
+"#;
 
 /// Verify the installed native automation CLI and its structured-output contract.
 pub fn preflight() -> Result<PreflightStatus, DeskActError> {
@@ -116,12 +197,40 @@ pub fn native_inventory() -> Result<NativeInventory, DeskActError> {
         )));
     }
 
-    let mut apps = envelope
+    let mut running_apps = envelope
         .data
         .ok_or_else(|| DeskActError("agent-desktop app inventory did not include data".into()))?
         .apps;
-    apps.sort_by_key(|app| app.name.to_lowercase());
-    Ok(NativeInventory { preflight, apps })
+    running_apps.sort_by_key(|app| app.name.to_lowercase());
+
+    let mut catalog = discover_app_catalog()?;
+    catalog.retain(|app| is_executable_target(&app.target));
+    catalog.sort_by_key(|app| {
+        (
+            app.name.to_lowercase(),
+            app.target.to_lowercase(),
+            app.arguments.to_lowercase(),
+        )
+    });
+    catalog.dedup_by(|left, right| {
+        left.name.eq_ignore_ascii_case(&right.name)
+            && left.target.eq_ignore_ascii_case(&right.target)
+            && left.arguments == right.arguments
+    });
+
+    Ok(NativeInventory {
+        preflight,
+        catalog,
+        running_apps,
+    })
+}
+
+fn is_executable_target(target: &str) -> bool {
+    let file_name = target.rsplit(['\\', '/']).next().unwrap_or(target);
+    let Some((_, extension)) = file_name.rsplit_once('.') else {
+        return false;
+    };
+    extension.eq_ignore_ascii_case("exe") || extension.eq_ignore_ascii_case("com")
 }
 
 fn parse_envelope<T: for<'de> Deserialize<'de>>(
@@ -159,6 +268,40 @@ fn cli_error(command: &str, error: Option<serde_json::Value>) -> DeskActError {
         .map(|value| value.to_string())
         .unwrap_or_else(|| "no error details provided".into());
     DeskActError(format!("agent-desktop `{command}` failed: {details}"))
+}
+
+fn discover_app_catalog() -> Result<Vec<DiscoveredApp>, DeskActError> {
+    let powershell =
+        env::var_os("DESKACT_POWERSHELL").unwrap_or_else(|| OsString::from("powershell.exe"));
+    let output = Command::new(&powershell)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            WINDOWS_APP_DISCOVERY_SCRIPT,
+        ])
+        .output()
+        .map_err(|error| {
+            let executable = powershell.to_string_lossy();
+            DeskActError(format!(
+                "Could not run Windows app discovery ({executable}): {error}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        let details = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(DeskActError(if details.is_empty() {
+            format!("Windows app discovery exited with status {}", output.status)
+        } else {
+            format!("Windows app discovery failed: {details}")
+        }));
+    }
+
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        DeskActError(format!(
+            "Windows app discovery returned invalid JSON: {error}"
+        ))
+    })
 }
 
 fn invoke_agent_desktop(command: &str) -> Result<Output, DeskActError> {

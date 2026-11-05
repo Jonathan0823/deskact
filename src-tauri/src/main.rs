@@ -21,11 +21,18 @@ fn main() -> ExitCode {
                     "agent-desktop {} (JSON contract {}) is ready",
                     inventory.preflight.tool_version, inventory.preflight.contract_version
                 );
-                println!("Running native apps: {}", inventory.apps.len());
-                if inventory.apps.is_empty() {
+                println!("Discovered native apps: {}", inventory.catalog.len());
+                for app in &inventory.catalog {
+                    println!("- {} [{}] -> {}", app.name, app.source, app.target);
+                }
+                println!(
+                    "Currently running GUI apps: {}",
+                    inventory.running_apps.len()
+                );
+                if inventory.running_apps.is_empty() {
                     println!("No running GUI applications found.");
                 } else {
-                    for app in inventory.apps {
+                    for app in inventory.running_apps {
                         println!("- {} (PID {}, {})", app.name, app.pid, app.presentation);
                     }
                 }

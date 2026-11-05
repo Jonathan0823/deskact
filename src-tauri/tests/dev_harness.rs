@@ -11,10 +11,15 @@ use std::{
 struct FakeAgentDesktop {
     dir: PathBuf,
     executable: PathBuf,
+    powershell: PathBuf,
 }
 
 impl FakeAgentDesktop {
     fn new(version_response: &str, apps_response: &str) -> Self {
+        Self::with_catalog(version_response, apps_response, "[]")
+    }
+
+    fn with_catalog(version_response: &str, apps_response: &str, catalog_response: &str) -> Self {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock is after the Unix epoch")
@@ -37,7 +42,24 @@ impl FakeAgentDesktop {
             .permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&executable, permissions).expect("make fake CLI executable");
-        Self { dir, executable }
+
+        let powershell = dir.join("powershell");
+        fs::write(
+            &powershell,
+            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", catalog_response),
+        )
+        .expect("write fake PowerShell");
+        let mut permissions = fs::metadata(&powershell)
+            .expect("read fake PowerShell metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&powershell, permissions).expect("make fake PowerShell executable");
+
+        Self {
+            dir,
+            executable,
+            powershell,
+        }
     }
 
     fn path(&self) -> &Path {
@@ -55,6 +77,7 @@ fn run_harness(fake: &FakeAgentDesktop, command: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_deskact-dev"))
         .arg(command)
         .env("DESKACT_AGENT_DESKTOP", fake.path())
+        .env("DESKACT_POWERSHELL", &fake.powershell)
         .output()
         .expect("run developer harness")
 }
@@ -128,10 +151,69 @@ fn inventory_lists_running_apps_in_a_stable_order() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("harness output is UTF-8");
-    assert!(stdout.contains("Running native apps: 2"), "{stdout}");
+    assert!(stdout.contains("Currently running GUI apps: 2"), "{stdout}");
     assert!(
         stdout.find("CalculatorApp.exe").unwrap() < stdout.find("Notepad.exe").unwrap(),
         "{stdout}"
+    );
+}
+
+#[test]
+fn inventory_lists_the_discovered_start_menu_and_registered_app_catalog() {
+    let fake = FakeAgentDesktop::with_catalog(
+        r#"{"version":"2.6","ok":true,"command":"version","data":{"os":"windows","target":"x86_64","version":"1.1.0"}}"#,
+        r#"{"version":"2.6","ok":true,"command":"list-apps","data":{"apps":[]}}"#,
+        r#"[{"name":"Notepad","target":"C:\\Windows\\System32\\notepad.exe","arguments":"","working_directory":"","source":"start-menu"},{"name":"Calculator","target":"C:\\Windows\\System32\\calc.exe","arguments":"","working_directory":"","source":"app-paths"}]"#,
+    );
+
+    let output = run_harness(&fake, "inventory");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("harness output is UTF-8");
+    assert!(stdout.contains("Discovered native apps: 2"), "{stdout}");
+    assert!(stdout.contains("Calculator [app-paths]"), "{stdout}");
+    assert!(stdout.contains("Notepad [start-menu]"), "{stdout}");
+}
+
+#[test]
+fn inventory_omits_shortcuts_that_do_not_target_an_executable() {
+    let fake = FakeAgentDesktop::with_catalog(
+        r#"{"version":"2.6","ok":true,"command":"version","data":{"os":"windows","target":"x86_64","version":"1.1.0"}}"#,
+        r#"{"version":"2.6","ok":true,"command":"list-apps","data":{"apps":[]}}"#,
+        r#"[{"name":"Notepad","target":"C:\\Windows\\System32\\notepad.exe","arguments":"","working_directory":"","source":"start-menu"},{"name":"Help","target":"C:\\Program Files\\Help\\manual.chm","arguments":"","working_directory":"","source":"start-menu"}]"#,
+    );
+
+    let output = run_harness(&fake, "inventory");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("harness output is UTF-8");
+    assert!(stdout.contains("Discovered native apps: 1"), "{stdout}");
+    assert!(!stdout.contains("Help [start-menu]"), "{stdout}");
+}
+
+#[test]
+fn inventory_reports_windows_catalog_discovery_errors_without_claiming_success() {
+    let fake = FakeAgentDesktop::with_catalog(
+        r#"{"version":"2.6","ok":true,"command":"version","data":{"os":"windows","target":"x86_64","version":"1.1.0"}}"#,
+        r#"{"version":"2.6","ok":true,"command":"list-apps","data":{"apps":[]}}"#,
+        "not-json",
+    );
+
+    let output = run_harness(&fake, "inventory");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("Windows app discovery returned invalid JSON"),
+        "{stderr}"
     );
 }
 
