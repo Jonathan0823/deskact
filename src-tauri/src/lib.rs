@@ -757,7 +757,7 @@ fn run_notepad_scenario_inner(
         .to_owned();
     *ui_may_have_changed = true;
     press_shortcut(cli, &original, "ctrl+n")?;
-    let new_tab = unique_window_for_id(cli, &original)?;
+    let new_tab = wait_for_window_title(cli, &original, "Untitled - Notepad", &original.title)?;
     if !new_tab.title.eq_ignore_ascii_case("Untitled - Notepad") {
         return Err(DeskActError(format!(
             "Ctrl+N did not produce the expected fresh `Untitled - Notepad` tab (observed `{}`). It was not closed.",
@@ -903,7 +903,7 @@ fn run_notepad_scenario_inner(
     }
 
     press_shortcut(cli, &saved_window, "ctrl+w")?;
-    let after_close = unique_window_for_id(cli, &original)?;
+    let after_close = wait_for_window_title(cli, &original, &original.title, &saved_title)?;
     if after_close.title != original.title {
         return Err(DeskActError(format!(
             "After closing the verified test tab, Notepad did not return to the original window title `{}` (observed `{}`).",
@@ -1010,13 +1010,56 @@ fn press_shortcut(
         "press",
         "--headed",
         "--app",
-        &window.app_name,
+        "notepad",
         "--window-id",
         &window.id,
         shortcut,
     ];
     invoke_success(cli, &args, "press")?;
     Ok(())
+}
+
+fn wait_for_window_title(
+    cli: &VerifiedNativeCli,
+    original: &NativeWindow,
+    expected_title: &str,
+    pending_title: &str,
+) -> Result<NativeWindow, DeskActError> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let windows = cli.windows_for_app("notepad")?;
+        if windows.len() != 1 {
+            return Err(DeskActError(format!(
+                "Expected one Notepad window while waiting for `{expected_title}`; found {}",
+                windows.len()
+            )));
+        }
+        let window = windows.into_iter().next().expect("one window checked");
+        if window.id != original.id
+            || window.pid != original.pid
+            || !window.accessible
+            || window.minimized
+        {
+            return Err(DeskActError(
+                "Notepad window identity changed while waiting for a tab transition".into(),
+            ));
+        }
+        if window.title.eq_ignore_ascii_case(expected_title) {
+            return Ok(window);
+        }
+        if !window.title.eq_ignore_ascii_case(pending_title) {
+            return Err(DeskActError(format!(
+                "Notepad tab transition was not confirmed: expected `{expected_title}` or pending `{pending_title}`, observed `{}`",
+                window.title
+            )));
+        }
+        if Instant::now() >= deadline {
+            return Err(DeskActError(format!(
+                "Notepad tab did not transition to `{expected_title}` before the deadline"
+            )));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn unique_window_for_id(
