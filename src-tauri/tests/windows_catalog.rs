@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use deskact_core::{DiscoverySource, discover_app_catalog};
+use deskact_core::{DiscoverySource, discover_app_catalog, process_image_path};
 
 struct WindowsCatalogFixture {
     name: String,
@@ -76,6 +76,18 @@ fn assert_success(output: &Output, action: &str) {
         "Could not {action}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn powershell_reports_the_current_process_image_path() {
+    let expected = std::env::current_exe().expect("get current test executable");
+    let actual = process_image_path(std::process::id()).expect("query current process image path");
+    let expected_name = expected.file_name().expect("executable has a filename");
+    let actual_name = std::path::Path::new(&actual)
+        .file_name()
+        .expect("reported image path has a filename");
+
+    assert!(expected_name.eq_ignore_ascii_case(actual_name));
 }
 
 #[test]

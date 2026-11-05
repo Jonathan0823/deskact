@@ -1,9 +1,16 @@
 //! Developer-only command-line harness for native preflight and inventory.
 
-use std::{env, process::ExitCode};
+use std::{
+    env,
+    io::{self, Write},
+    process::ExitCode,
+};
 
-use deskact_core::{native_inventory, preflight};
+use deskact_core::{
+    NativeTargetResolution, VerifiedNativeCli, native_inventory, preflight, resolve_native_target,
+};
 
+/// Run the developer-only native preflight, inventory, or target-resolution command.
 fn main() -> ExitCode {
     let command = env::args().nth(1);
     match command.as_deref() {
@@ -17,6 +24,19 @@ fn main() -> ExitCode {
             }
             Err(error) => fail(error.to_string()),
         },
+        Some("resolve") => {
+            let mut arguments = env::args().skip(2);
+            match (arguments.next(), arguments.next()) {
+                (Some(app_name), None) => match resolve_native_target(&app_name) {
+                    Ok(resolution) => finish_resolution(resolution),
+                    Err(error) => fail(error.to_string()),
+                },
+                _ => {
+                    eprintln!("Usage: deskact-dev resolve <discovered-app-name>");
+                    ExitCode::from(2)
+                }
+            }
+        }
         Some("inventory") => match native_inventory() {
             Ok(inventory) => {
                 println!(
@@ -48,12 +68,56 @@ fn main() -> ExitCode {
         },
 
         _ => {
-            eprintln!("Usage: deskact-dev <preflight|inventory>");
+            eprintln!("Usage: deskact-dev <preflight|inventory|resolve <discovered-app-name>>");
             ExitCode::from(2)
         }
     }
 }
 
+/// Present a resolved target or pause for manual restoration and then resume resolution.
+fn finish_resolution(mut resolution: NativeTargetResolution) -> ExitCode {
+    loop {
+        match resolution {
+            NativeTargetResolution::Ready(target) => {
+                println!(
+                    "Resolved {} to accessible window `{}` ({}); fresh snapshot {} has {} actionable controls.",
+                    target.app.name,
+                    target.window.title,
+                    target.window.id,
+                    target.snapshot_id,
+                    target.ref_count
+                );
+                return ExitCode::SUCCESS;
+            }
+            NativeTargetResolution::NeedsManualRestore { app, window } => {
+                print!(
+                    "Window `{}` for {} is minimized. Restore it manually, then press Enter to re-enumerate (or type q to cancel): ",
+                    window.title, app.name
+                );
+                if io::stdout().flush().is_err() {
+                    return fail("Could not write the restore prompt".into());
+                }
+                let mut response = String::new();
+                let bytes_read = match io::stdin().read_line(&mut response) {
+                    Ok(bytes_read) => bytes_read,
+                    Err(_) => return fail("Could not read the restore confirmation".into()),
+                };
+                if bytes_read == 0 || response.trim().eq_ignore_ascii_case("q") {
+                    eprintln!("Resolution cancelled; no window was selected.");
+                    return ExitCode::from(1);
+                }
+                resolution = match VerifiedNativeCli::connect()
+                    .and_then(|cli| cli.resume_after_manual_restore(app))
+                {
+                    Ok(resolution) => resolution,
+                    Err(error) => return fail(error.to_string()),
+                };
+            }
+        }
+    }
+}
+
+/// Print an actionable harness error and return a non-success exit code.
 fn fail(message: String) -> ExitCode {
     eprintln!("Native desktop capability unavailable: {message}");
     ExitCode::from(1)
