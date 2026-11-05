@@ -1,6 +1,6 @@
 name: Rust CI
 
-on:
+"on":
   pull_request:
   push:
     branches: [main]
@@ -13,7 +13,7 @@ jobs:
     name: Format, test, and lint (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -28,7 +28,14 @@ jobs:
     name: Build all targets (Windows x64)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Build all targets
         run: cargo build --manifest-path src-tauri/Cargo.toml --all-targets --release --locked
+      - name: Upload Windows developer harness
+        uses: actions/upload-artifact@v7
+        with:
+          name: deskact-dev-windows-x64
+          path: src-tauri/target/release/deskact-dev.exe
+          if-no-files-found: error
+          retention-days: 14

@@ -58,6 +58,8 @@ cargo run --manifest-path src-tauri/Cargo.toml -- inventory
 
 The native CLI must be installed separately as described above. For a non-default npm installation, set `DESKACT_AGENT_DESKTOP` to the underlying executable path; do not point it at a PowerShell script or shell wrapper. Set `DESKACT_POWERSHELL` only when PowerShell is not discoverable by its default executable name. The harness reports discovered app names, targets, and sources, plus running app names, process IDs, and presentation state returned by `agent-desktop`.
 
+The Windows CI job uploads a `deskact-dev-windows-x64` artifact for 14 days. This is a developer command-line harness, not an installer or end-user DeskAct app; it still requires the separately installed `agent-desktop` CLI.
+
 ## License
 
 DeskAct's source code and documentation are licensed under the [Apache License 2.0](LICENSE). Copyright © 2026 Eguin Jonathan. This project license applies to DeskAct materials; independently installed third-party tools remain under their respective upstream licenses. Third-party components shipped inside a future DeskAct release will retain their own license terms and required notices.
