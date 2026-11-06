@@ -1021,6 +1021,7 @@ pub fn run_vlc_acceptance() -> Result<(), DeskActError> {
         }
     };
     let mut selected_window = None;
+    let mut launched_pid = None;
     let result = (|| {
         write_silent_wav(&media)?;
         let existing_ids: HashSet<String> = cli
@@ -1029,7 +1030,7 @@ pub fn run_vlc_acceptance() -> Result<(), DeskActError> {
             .filter(|window| executable_stem(&window.app_name).eq_ignore_ascii_case("vlc"))
             .map(|window| window.id)
             .collect();
-        launch_vlc(&media, &config)?;
+        launched_pid = Some(launch_vlc(&media, &config)?);
         let fixture_name = media
             .file_name()
             .and_then(OsStr::to_str)
@@ -1039,6 +1040,7 @@ pub fn run_vlc_acceptance() -> Result<(), DeskActError> {
         selected_window = Some(window.clone());
 
         let first_snapshot = fresh_snapshot(&cli, &window)?;
+        require_vlc_playing_state(&first_snapshot)?;
         let (first_position, duration) = vlc_playback_times(&first_snapshot)?;
         if first_position >= duration {
             return Err(DeskActError(
@@ -1048,6 +1050,7 @@ pub fn run_vlc_acceptance() -> Result<(), DeskActError> {
         thread::sleep(VLC_OBSERVATION_INTERVAL);
 
         let second_snapshot = fresh_snapshot(&cli, &window)?;
+        require_vlc_playing_state(&second_snapshot)?;
         let (second_position, second_duration) = vlc_playback_times(&second_snapshot)?;
         if second_duration != duration || second_position >= second_duration {
             return Err(DeskActError(
@@ -1074,7 +1077,8 @@ pub fn run_vlc_acceptance() -> Result<(), DeskActError> {
             "Could not remove test-created VLC fixture workspace: {error}"
         ))),
     };
-    let cleanup = close_result.and(directory_cleanup);
+    let process_cleanup = launched_pid.map_or(Ok(()), |pid| stop_owned_vlc_process(pid, &media));
+    let cleanup = combine_cleanup_results([close_result, process_cleanup, directory_cleanup]);
     match (result, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(operation), Ok(())) => Err(operation),
@@ -1117,8 +1121,8 @@ fn write_silent_wav(path: &Path) -> Result<(), DeskActError> {
         .map_err(|error| DeskActError(format!("Could not write VLC test media fixture: {error}")))
 }
 
-/// Launch VLC with isolated settings and metadata networking disabled, using only the generated fixture.
-fn launch_vlc(media: &Path, config: &Path) -> Result<(), DeskActError> {
+/// Launch VLC with an isolated vlcrc, disabled recent-media tracking, and only the generated fixture.
+fn launch_vlc(media: &Path, config: &Path) -> Result<u32, DeskActError> {
     let powershell =
         env::var_os("DESKACT_POWERSHELL").unwrap_or_else(|| OsString::from("powershell.exe"));
     let media_path = native_ui_path(media)?;
@@ -1137,8 +1141,9 @@ if ([string]::IsNullOrWhiteSpace($exe)) {{
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {{ throw 'Configured VLC executable does not exist' }}
 $config = {}
 $media = {}
-$arguments = '--no-one-instance --no-qt-privacy-ask --no-metadata-network-access --no-qt-updates-notif --config="' + $config + '" "' + $media + '"'
-Start-Process -FilePath $exe -ArgumentList $arguments | Out-Null
+$arguments = '--no-one-instance --no-qt-privacy-ask --no-qt-recentplay --no-metadata-network-access --no-qt-updates-notif --config="' + $config + '" "' + $media + '"'
+$process = Start-Process -FilePath $exe -ArgumentList $arguments -PassThru
+Write-Output "DESKACT_VLC_PID=$($process.Id)"
 "#,
         powershell_literal(&executable),
         powershell_literal(&config_path),
@@ -1147,9 +1152,10 @@ Start-Process -FilePath $exe -ArgumentList $arguments | Out-Null
     let mut command = Command::new(powershell);
     command
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .env("DESKACT_VLC_MEDIA", &media_path);
-    let status = match run_command_status_with_timeout(&mut command, NATIVE_PROCESS_TIMEOUT) {
-        Ok(status) => status,
+        .env("DESKACT_VLC_MEDIA", &media_path)
+        .env("DESKACT_VLC_CONFIG", &config_path);
+    let output = match run_command_with_timeout(&mut command, NATIVE_PROCESS_TIMEOUT) {
+        Ok(output) => output,
         Err(CommandRunError::TimedOut) => {
             return Err(DeskActError(
                 "PowerShell timed out while launching the VLC fixture".into(),
@@ -1161,12 +1167,70 @@ Start-Process -FilePath $exe -ArgumentList $arguments | Out-Null
             )));
         }
     };
-    if !status.success() {
+    if !output.status.success() {
         return Err(DeskActError(
             "PowerShell could not start VLC with the generated fixture".into(),
         ));
     }
-    Ok(())
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("DESKACT_VLC_PID=")
+                .and_then(|pid| pid.parse::<u32>().ok())
+        })
+        .ok_or_else(|| DeskActError("PowerShell did not return the launched VLC process ID".into()))
+}
+
+/// Stop only the launched VLC PID when its process command line still identifies this fixture.
+fn stop_owned_vlc_process(pid: u32, media: &Path) -> Result<(), DeskActError> {
+    let powershell =
+        env::var_os("DESKACT_POWERSHELL").unwrap_or_else(|| OsString::from("powershell.exe"));
+    let media_path = native_ui_path(media)?;
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+$pidToStop = {pid}
+$media = {}
+$process = Get-CimInstance Win32_Process -Filter "ProcessId=$pidToStop"
+if ($null -eq $process) {{ exit 0 }}
+if ([IO.Path]::GetFileName($process.ExecutablePath) -ine 'vlc.exe' -or -not $process.CommandLine.Contains($media)) {{
+    throw 'Refusing to stop a process that no longer matches the DeskAct VLC fixture'
+}}
+Stop-Process -Id $pidToStop -Force
+"#,
+        powershell_literal(&media_path)
+    );
+    let mut command = Command::new(powershell);
+    command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    match run_command_status_with_timeout(&mut command, NATIVE_PROCESS_TIMEOUT) {
+        Ok(status) if status.success() => Ok(()),
+        Ok(_) => Err(DeskActError(format!(
+            "Could not safely stop DeskAct-owned VLC process {pid}"
+        ))),
+        Err(CommandRunError::TimedOut) => Err(DeskActError(format!(
+            "Timed out while stopping DeskAct-owned VLC process {pid}"
+        ))),
+        Err(CommandRunError::Io(error)) => Err(DeskActError(format!(
+            "Could not start PowerShell to stop DeskAct-owned VLC process {pid}: {error}"
+        ))),
+    }
+}
+
+/// Collect every cleanup error without skipping later cleanup steps.
+fn combine_cleanup_results<const N: usize>(
+    results: [Result<(), DeskActError>; N],
+) -> Result<(), DeskActError> {
+    let errors: Vec<_> = results
+        .into_iter()
+        .filter_map(Result::err)
+        .map(|error| error.0)
+        .collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(DeskActError(errors.join("; ")))
+    }
 }
 
 /// Escape one value as a PowerShell single-quoted string literal.
@@ -1234,6 +1298,50 @@ fn validate_vlc_window(window: &NativeWindow) -> Result<(), DeskActError> {
         )));
     }
     Ok(())
+}
+
+/// Require explicit accessible evidence that VLC is currently playing.
+fn require_vlc_playing_state(snapshot: &serde_json::Value) -> Result<(), DeskActError> {
+    fn visit(node: &serde_json::Value, states: &mut Vec<bool>) {
+        let role = node.get("role").and_then(serde_json::Value::as_str);
+        let name = node.get("name").and_then(serde_json::Value::as_str);
+        if let (Some(role), Some(name)) = (role, name) {
+            let name = name.trim();
+            if role == "statictext" && name.eq_ignore_ascii_case("playing") {
+                states.push(true);
+            } else if role == "statictext"
+                && (name.eq_ignore_ascii_case("paused") || name.eq_ignore_ascii_case("stopped"))
+            {
+                states.push(false);
+            } else if role == "button" && name.eq_ignore_ascii_case("pause") {
+                states.push(true);
+            } else if role == "button" && name.eq_ignore_ascii_case("play") {
+                states.push(false);
+            }
+        }
+        if let Some(children) = node.get("children").and_then(serde_json::Value::as_array) {
+            for child in children {
+                visit(child, states);
+            }
+        }
+    }
+
+    let mut states = Vec::new();
+    if let Some(tree) = snapshot.get("tree") {
+        visit(tree, &mut states);
+    }
+    match states.as_slice() {
+        [true] => Ok(()),
+        [false] => Err(DeskActError(
+            "VLC was not in the playing state in a fresh accessibility snapshot; playback is unverified".into(),
+        )),
+        [] => Err(DeskActError(
+            "VLC did not expose an accessible playback state in a fresh snapshot; playback is unverified".into(),
+        )),
+        _ => Err(DeskActError(
+            "VLC exposed conflicting or ambiguous accessible playback state; playback is unverified".into(),
+        )),
+    }
 }
 
 /// Read the current and total playback clock values from exactly two accessible VLC text nodes.
@@ -1312,14 +1420,7 @@ fn close_test_vlc_window(
         return Ok(());
     }
     validate_vlc_window(window)?;
-    let snapshot = fresh_snapshot(cli, window)?;
-    let close = unique_control(
-        &snapshot,
-        "button",
-        Some("Close"),
-        "VLC window Close button",
-    )?;
-    invoke_success(cli, &["click", control_ref(close)?], "click")?;
+    press_app_shortcut(cli, window, "vlc.exe", "alt+f4")?;
 
     let deadline = Instant::now() + APP_READINESS_TIMEOUT;
     loop {
