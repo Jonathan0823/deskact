@@ -8,7 +8,7 @@ use std::{
 
 use deskact_core::{
     NativeTargetResolution, VerifiedNativeCli, native_inventory, preflight, resolve_native_target,
-    run_notepad_acceptance,
+    run_file_explorer_acceptance, run_notepad_acceptance,
 };
 
 /// Run the developer-only native preflight, inventory, target-resolution, or acceptance command.
@@ -38,6 +38,13 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("file-explorer-acceptance") => match run_file_explorer_acceptance() {
+            Ok(()) => {
+                println!("File Explorer acceptance verified the fixture path and filename.");
+                ExitCode::SUCCESS
+            }
+            Err(error) => fail(error.to_string()),
+        },
         Some("notepad-acceptance") => {
             let arguments: Vec<_> = env::args().skip(2).collect();
             let runs = match arguments.as_slice() {
@@ -109,7 +116,7 @@ fn main() -> ExitCode {
 
         _ => {
             eprintln!(
-                "Usage: deskact-dev <preflight|inventory|resolve <discovered-app-name>|notepad-acceptance [--runs <count>]>"
+                "Usage: deskact-dev <preflight|inventory|resolve <discovered-app-name>|notepad-acceptance [--runs <count>]|file-explorer-acceptance>"
             );
             ExitCode::from(2)
         }
