@@ -14,6 +14,7 @@ use deskact_core::{
 };
 
 /// Run the developer-only native preflight, inventory, target-resolution, or acceptance command.
+/// Dispatch and run one developer-harness command.
 fn main() -> ExitCode {
     let command = env::args().nth(1);
     match command.as_deref() {
@@ -190,9 +191,29 @@ fn run_app_catalog_command(arguments: &[String]) -> ExitCode {
                 })
             })
         }
+        [command, arguments @ ..] if command == "validate-selection" => {
+            parse_validation_arguments(arguments).and_then(|(request, response_json)| {
+                load_app_catalog().and_then(|catalog| {
+                    let prepared = prepare_app_selection(&catalog, &request)?;
+                    let outcome = deskact_core::validate_model_app_selection(
+                        &prepared,
+                        &catalog,
+                        &response_json,
+                    )?;
+                    Ok(match outcome {
+                        deskact_core::AppSelectionOutcome::Selected(entry) => {
+                            format!("Validated selection: {} ({})", entry.name, entry.id)
+                        }
+                        deskact_core::AppSelectionOutcome::Clarify(ids) => {
+                            format!("Validated clarification among: {}", ids.join(", "))
+                        }
+                    })
+                })
+            })
+        }
         _ => {
             eprintln!(
-                "Usage: deskact-dev app-catalog <list|add <name> <absolute-exe> [--alias <phrase> ...]|edit <id> [--name <name>] [--target <absolute-exe>] [--alias <phrase> ...|--clear-aliases]|prepare <natural-language-request>"
+                "Usage: deskact-dev app-catalog <list|add <name> <absolute-exe> [--alias <phrase> ...]|edit <id> [--name <name>] [--target <absolute-exe>] [--alias <phrase> ...|--clear-aliases]|prepare <natural-language-request>|validate-selection <natural-language-request> --response-json <fixture-json>"
             );
             return ExitCode::from(2);
         }
@@ -230,6 +251,30 @@ fn parse_aliases(arguments: &[String]) -> Result<Vec<String>, deskact_core::Desk
     Ok(aliases)
 }
 
+/// Parse the original request and one fixture response separated by `--response-json`.
+fn parse_validation_arguments(
+    arguments: &[String],
+) -> Result<(String, String), deskact_core::DeskActError> {
+    let Some(separator) = arguments
+        .iter()
+        .position(|argument| argument == "--response-json")
+    else {
+        return Err(deskact_core::DeskActError::new(
+            "validate-selection requires --response-json <fixture-json>".into(),
+        ));
+    };
+    if separator == 0 || arguments.len() != separator + 2 {
+        return Err(deskact_core::DeskActError::new(
+            "Provide one app request before --response-json and exactly one JSON response after it"
+                .into(),
+        ));
+    }
+    Ok((
+        arguments[..separator].join(" "),
+        arguments[separator + 1].clone(),
+    ))
+}
+
 /// Optional fields for editing one user-configured app entry.
 struct AppCatalogEditOptions {
     name: Option<String>,
@@ -258,7 +303,14 @@ fn parse_edit_options(
                 match flag {
                     "--name" if name.is_none() => name = Some(value.clone()),
                     "--target" if target.is_none() => target = Some(value.clone()),
-                    "--alias" => aliases.get_or_insert_with(Vec::new).push(value.clone()),
+                    "--alias" if !clear_aliases => {
+                        aliases.get_or_insert_with(Vec::new).push(value.clone());
+                    }
+                    "--alias" => {
+                        return Err(deskact_core::DeskActError::new(
+                            "--alias cannot be combined with --clear-aliases".into(),
+                        ));
+                    }
                     _ => {
                         return Err(deskact_core::DeskActError::new(format!(
                             "Option `{flag}` may be supplied only once"

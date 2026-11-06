@@ -4,7 +4,7 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -43,7 +43,7 @@ impl Fixture {
             r#"#!/bin/sh
 case "$*" in
   *Win32_Process*) printf '%s\n' "$DESKACT_TEST_PROCESS_PATH" ;;
-  *) printf '%s\n' "$DESKACT_TEST_DISCOVERY" ;;
+  *) sleep "${DESKACT_TEST_DISCOVERY_DELAY:-0}"; printf '%s\n' "$DESKACT_TEST_DISCOVERY" ;;
 esac
 "#,
         )
@@ -90,10 +90,18 @@ esac
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        self.run_with_process_path(args, "")
+        self.run_with_fixture(args, "", DISCOVERED)
     }
 
     fn run_with_process_path(&self, args: &[&str], process_path: &str) -> Output {
+        self.run_with_fixture(args, process_path, DISCOVERED)
+    }
+
+    fn run_with_discovery(&self, args: &[&str], discovery: &str) -> Output {
+        self.run_with_fixture(args, "", discovery)
+    }
+
+    fn run_with_fixture(&self, args: &[&str], process_path: &str, discovery: &str) -> Output {
         Command::new(env!("CARGO_BIN_EXE_deskact-dev"))
             .args(args)
             .env("DESKACT_APP_CATALOG", &self.catalog_file)
@@ -101,9 +109,19 @@ esac
             .env("DESKACT_POWERSHELL", &self.powershell)
             .env("DESKACT_TEST_CALLS", &self.calls)
             .env("DESKACT_TEST_PROCESS_PATH", process_path)
-            .env("DESKACT_TEST_DISCOVERY", DISCOVERED)
+            .env("DESKACT_TEST_DISCOVERY", discovery)
+            .env("DESKACT_TEST_DISCOVERY_DELAY", "")
             .output()
             .expect("run developer harness")
+    }
+
+    fn write_entries(&self, entries: &[AppCatalogEntry]) {
+        let store = serde_json::json!({ "version": 1, "entries": entries });
+        fs::write(
+            &self.catalog_file,
+            serde_json::to_vec_pretty(&store).unwrap(),
+        )
+        .expect("write app catalog fixture");
     }
 
     fn listed_entries(&self) -> Vec<AppCatalogEntry> {
@@ -133,6 +151,27 @@ fn custom_entry(id: &str, name: &str, target: &str, aliases: &[&str]) -> AppCata
         source: AppCatalogSource::UserConfigured,
         aliases: aliases.iter().map(|alias| (*alias).to_owned()).collect(),
     }
+}
+
+/// Case-sensitive shortcut arguments remain part of discovered identity and are not deduplicated.
+#[test]
+fn discovered_entries_with_argument_case_differences_keep_distinct_ids() {
+    let fixture = Fixture::new();
+    let discovery = r#"{"entries":[{"name":"Editor","target":"C:\\Apps\\editor.exe","arguments":"--Profile Alpha","working_directory":"","source":"start-menu"},{"name":"Editor","target":"C:\\Apps\\editor.exe","arguments":"--profile Alpha","working_directory":"","source":"start-menu"}],"skipped_start_menu_shortcuts":0}"#;
+    let output = fixture.run_with_discovery(&["app-catalog", "list"], discovery);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let entries: Vec<AppCatalogEntry> = serde_json::from_slice(&output.stdout).unwrap();
+    let editors: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.name == "Editor")
+        .collect();
+    assert_eq!(editors.len(), 2);
+    assert_ne!(editors[0].id, editors[1].id);
+    assert_ne!(editors[0].arguments, editors[1].arguments);
 }
 
 /// Explicit app entries persist and remain editable without changing their stable identity.
@@ -230,6 +269,43 @@ fn conflicting_aliases_are_rejected_and_existing_catalog_is_unchanged() {
     );
 }
 
+/// Concurrent processes add entries without overwriting each other's catalog updates.
+#[test]
+fn concurrent_app_catalog_updates_are_serialized_across_processes() {
+    use std::process::Child;
+
+    let fixture = Fixture::new();
+    let mut children: Vec<Child> = (0..6)
+        .map(|index| {
+            let target = fixture.target(&format!("parallel-{index}.exe"));
+            Command::new(env!("CARGO_BIN_EXE_deskact-dev"))
+                .args([
+                    "app-catalog",
+                    "add",
+                    &format!("Parallel App {index}"),
+                    target.to_str().unwrap(),
+                ])
+                .env("DESKACT_APP_CATALOG", &fixture.catalog_file)
+                .env("DESKACT_POWERSHELL", &fixture.powershell)
+                .env("DESKACT_TEST_DISCOVERY", DISCOVERED)
+                .env("DESKACT_TEST_DISCOVERY_DELAY", "0.1")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn concurrent catalog update")
+        })
+        .collect();
+    for child in &mut children {
+        assert!(child.wait().unwrap().success());
+    }
+    let configured = fixture
+        .listed_entries()
+        .into_iter()
+        .filter(|entry| entry.source == AppCatalogSource::UserConfigured)
+        .count();
+    assert_eq!(configured, 6);
+}
+
 /// User aliases cannot shadow a canonical app discovered from Windows.
 #[test]
 fn aliases_conflicting_with_discovered_app_names_are_rejected() {
@@ -246,6 +322,126 @@ fn aliases_conflicting_with_discovered_app_names_are_rejected() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("conflicts"));
     assert_eq!(fixture.listed_entries().len(), 1);
+}
+
+/// Existing conflicts remain visible and repairable, while exact conflicted names require clarification.
+#[test]
+fn existing_alias_conflicts_do_not_block_listing_selection_or_repair() {
+    let fixture = Fixture::new();
+    let first_target = fixture.target("first.exe");
+    let second_target = fixture.target("second.exe");
+    fixture.write_entries(&[
+        custom_entry(
+            "custom-first",
+            "First Player",
+            first_target.to_str().unwrap(),
+            &["shared"],
+        ),
+        custom_entry(
+            "custom-second",
+            "Second Player",
+            second_target.to_str().unwrap(),
+            &["shared"],
+        ),
+    ]);
+
+    let listed = fixture.listed_entries();
+    assert!(listed.iter().any(|entry| entry.id == "custom-first"));
+    let exact = fixture.run(&["app-catalog", "prepare", "Calculator"]);
+    assert!(
+        exact.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exact.stderr)
+    );
+    let exact: AppSelectionInput = serde_json::from_slice(&exact.stdout).unwrap();
+    assert!(matches!(exact, AppSelectionInput::ExactMatch { entry } if entry.name == "Calculator"));
+
+    let conflicted = fixture.run(&["app-catalog", "prepare", "shared"]);
+    assert!(
+        conflicted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&conflicted.stderr)
+    );
+    let conflicted: AppSelectionInput = serde_json::from_slice(&conflicted.stdout).unwrap();
+    assert!(
+        matches!(conflicted, AppSelectionInput::NeedsClarification { candidates } if candidates.len() == 2)
+    );
+    let resolution = fixture.run(&["resolve", "shared"]);
+    assert!(!resolution.status.success());
+    assert!(String::from_utf8_lossy(&resolution.stderr).contains("ask the user"));
+    assert!(
+        !fs::read_to_string(&fixture.calls)
+            .unwrap_or_default()
+            .contains("launch")
+    );
+
+    let introduced = fixture.run(&[
+        "app-catalog",
+        "edit",
+        "custom-first",
+        "--alias",
+        "Second Player",
+    ]);
+    assert!(!introduced.status.success());
+    assert!(
+        fixture
+            .listed_entries()
+            .iter()
+            .any(|entry| { entry.id == "custom-first" && entry.aliases == ["shared"] })
+    );
+
+    let repaired = fixture.run(&[
+        "app-catalog",
+        "edit",
+        "custom-first",
+        "--alias",
+        "first-only",
+    ]);
+    assert!(
+        repaired.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repaired.stderr)
+    );
+    let after = fixture.listed_entries();
+    assert!(
+        after
+            .iter()
+            .any(|entry| entry.id == "custom-first" && entry.aliases == ["first-only"])
+    );
+}
+
+/// Alias and clear options are rejected in either order without modifying persisted aliases.
+#[test]
+fn alias_and_clear_alias_options_conflict_in_both_orders() {
+    let fixture = Fixture::new();
+    let target = fixture.target("player.exe");
+    let entry = custom_entry(
+        "custom-player",
+        "Player",
+        target.to_str().unwrap(),
+        &["old"],
+    );
+    fixture.write_entries(std::slice::from_ref(&entry));
+    for options in [
+        ["--clear-aliases", "--alias", "new"],
+        ["--alias", "new", "--clear-aliases"],
+    ] {
+        let output = fixture.run(&[
+            "app-catalog",
+            "edit",
+            "custom-player",
+            options[0],
+            options[1],
+            options[2],
+        ]);
+        assert!(!output.status.success());
+        let current = fixture.listed_entries();
+        let current = current
+            .iter()
+            .find(|item| item.id == "custom-player")
+            .unwrap();
+        assert_eq!(current.aliases, ["old"]);
+    }
 }
 
 /// Custom targets must be existing absolute executable files, not shell fragments or guessed paths.
@@ -366,6 +562,84 @@ fn prepare_command_outputs_catalog_candidates_without_launch_targets() {
     );
 }
 
+/// The harness validates fixture model responses against the freshly prepared local candidate set.
+#[test]
+fn validate_selection_command_accepts_valid_choices_and_rejects_unsafe_responses() {
+    let fixture = Fixture::new();
+    let target = fixture.target("editor.exe");
+    let added = fixture.run(&["app-catalog", "add", "My Editor", target.to_str().unwrap()]);
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let entry: AppCatalogEntry = serde_json::from_slice(&added.stdout).unwrap();
+    let prepared = fixture.run(&["app-catalog", "prepare", "open my editor"]);
+    let prepared: AppSelectionInput = serde_json::from_slice(&prepared.stdout).unwrap();
+    let AppSelectionInput::NeedsModel { candidates, .. } = prepared else {
+        panic!("request should require model selection");
+    };
+    let second_id = candidates
+        .iter()
+        .find(|candidate| candidate.id != entry.id)
+        .unwrap()
+        .id
+        .clone();
+
+    let selected_json = format!(r#"{{"decision":"select","candidate_id":"{}"}}"#, entry.id);
+    let selected = fixture.run(&[
+        "app-catalog",
+        "validate-selection",
+        "open",
+        "my",
+        "editor",
+        "--response-json",
+        &selected_json,
+    ]);
+    assert!(
+        selected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    assert!(String::from_utf8_lossy(&selected.stdout).contains(&entry.id));
+
+    let clarification_json = format!(
+        r#"{{"decision":"clarify","candidate_ids":["{}","{}"]}}"#,
+        entry.id, second_id
+    );
+    let clarification = fixture.run(&[
+        "app-catalog",
+        "validate-selection",
+        "open",
+        "my",
+        "editor",
+        "--response-json",
+        &clarification_json,
+    ]);
+    assert!(
+        clarification.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clarification.stderr)
+    );
+    assert!(String::from_utf8_lossy(&clarification.stdout).contains("Validated clarification"));
+
+    for response in [
+        r#"{"decision":"select","candidate_id":"outside"}"#,
+        r#"{"decision":"select","candidate_id":"custom-player","target":"C:\\evil.exe"}"#,
+    ] {
+        let rejected = fixture.run(&[
+            "app-catalog",
+            "validate-selection",
+            "open",
+            "my",
+            "editor",
+            "--response-json",
+            response,
+        ]);
+        assert!(!rejected.status.success(), "accepted response: {response}");
+    }
+}
+
 /// User-configured app resolution shares the fresh-window, owner, and accessibility gates.
 #[test]
 fn exact_custom_app_resolution_uses_safe_direct_launch_and_fresh_window_verification() {
@@ -421,6 +695,23 @@ fn model_selection_rejects_unknown_ids_and_accepts_valid_selection_or_clarificat
     assert!(
         matches!(clarification, AppSelectionOutcome::Clarify(ref ids) if ids == &["custom-1", "custom-2"])
     );
+
+    let AppSelectionInput::NeedsModel { request, .. } = &input else {
+        panic!("expected a model candidate input");
+    };
+    let subset = AppSelectionInput::NeedsModel {
+        request: request.clone(),
+        candidates: vec![deskact_core::AppCandidate {
+            id: "custom-1".into(),
+            display_name: "Visual Studio Code".into(),
+        }],
+    };
+    for response in [
+        r#"{"decision":"select","candidate_id":"custom-2"}"#,
+        r#"{"decision":"clarify","candidate_ids":["custom-1","custom-2"]}"#,
+    ] {
+        assert!(validate_model_app_selection(&subset, &catalog, response).is_err());
+    }
 
     for response in [
         r#"{"decision":"select","candidate_id":"invented"}"#,

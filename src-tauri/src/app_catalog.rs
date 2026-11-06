@@ -2,16 +2,20 @@
 
 use std::{
     env, fs,
+    fs::OpenOptions,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{DeskActError, DiscoveredApp, DiscoverySource, windows_catalog::discover_app_catalog};
 
+/// Current on-disk app catalog schema version.
 const STORE_VERSION: u32 = 1;
+/// In-process sequence used to disambiguate user-entry IDs created in the same clock tick.
 static USER_ENTRY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Origin of a candidate in DeskAct's app catalog.
@@ -57,6 +61,7 @@ pub struct AppCatalogEntry {
 }
 
 impl AppCatalogEntry {
+    /// Convert a discovered Windows application into a catalog entry with a stable ID.
     pub(crate) fn from_discovered(app: DiscoveredApp) -> Self {
         let id = discovered_entry_id(&app);
         let source = match app.source {
@@ -75,6 +80,7 @@ impl AppCatalogEntry {
         }
     }
 
+    /// Restore the native resolver's app shape from a locally authoritative catalog entry.
     pub(crate) fn as_discovered_app(&self) -> DiscoveredApp {
         let source = match self.source {
             AppCatalogSource::StartMenu => DiscoverySource::StartMenu,
@@ -149,11 +155,23 @@ pub enum AppSelectionOutcome {
     Clarify(Vec<String>),
 }
 
+/// Versioned persisted representation of explicitly configured app entries.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AppCatalogStore {
     version: u32,
     entries: Vec<AppCatalogEntry>,
+}
+
+/// Cross-process exclusive lock held while a catalog update is read, validated, and written.
+struct CatalogLock {
+    file: fs::File,
+}
+
+impl Drop for CatalogLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
 }
 
 /// Load current discovered apps and explicitly configured local app entries.
@@ -165,18 +183,6 @@ pub fn load_app_catalog() -> Result<Vec<AppCatalogEntry>, DeskActError> {
     let mut entries: Vec<_> = discovered.chain(configured).collect();
     entries.sort_by_key(|entry| (entry.name.to_lowercase(), entry.id.clone()));
     ensure_unique_catalog_ids(&entries)?;
-    let configured_entries: Vec<_> = entries
-        .iter()
-        .filter(|entry| entry.source == AppCatalogSource::UserConfigured)
-        .collect();
-    for entry in configured_entries {
-        let others: Vec<_> = entries
-            .iter()
-            .filter(|other| other.id != entry.id)
-            .cloned()
-            .collect();
-        ensure_no_alias_conflicts(entry, &others)?;
-    }
     Ok(entries)
 }
 
@@ -304,7 +310,9 @@ pub fn add_user_app_entry(
     let name = validate_display_name(name)?;
     let target = validate_executable_target(target)?;
     let aliases = normalize_aliases(aliases)?;
+    let _lock = acquire_catalog_lock()?;
     let mut store = read_store()?;
+    let before = load_app_catalog()?;
     let candidate = AppCatalogEntry {
         id: new_user_entry_id(),
         name,
@@ -314,7 +322,9 @@ pub fn add_user_app_entry(
         source: AppCatalogSource::UserConfigured,
         aliases,
     };
-    ensure_no_alias_conflicts(&candidate, &load_app_catalog()?)?;
+    let mut after = before.clone();
+    after.push(candidate.clone());
+    reject_new_conflicts(&before, &after)?;
     store.entries.push(candidate.clone());
     write_store(&store.entries)?;
     Ok(candidate)
@@ -327,7 +337,9 @@ pub fn edit_user_app_entry(
     target: Option<&str>,
     aliases: Option<Vec<String>>,
 ) -> Result<AppCatalogEntry, DeskActError> {
+    let _lock = acquire_catalog_lock()?;
     let mut store = read_store()?;
+    let mut catalog = load_app_catalog()?;
     let Some(index) = store.entries.iter().position(|entry| entry.id == id) else {
         return Err(DeskActError(format!(
             "No user-configured app entry has ID `{id}`"
@@ -343,16 +355,20 @@ pub fn edit_user_app_entry(
     if let Some(aliases) = aliases {
         edited.aliases = normalize_aliases(aliases)?;
     }
-    let other_entries: Vec<_> = load_app_catalog()?
-        .into_iter()
-        .filter(|entry| entry.id != id)
-        .collect();
-    ensure_no_alias_conflicts(&edited, &other_entries)?;
+    let before = catalog.clone();
+    let Some(catalog_index) = catalog.iter().position(|entry| entry.id == id) else {
+        return Err(DeskActError(format!(
+            "No local catalog entry has ID `{id}`"
+        )));
+    };
+    catalog[catalog_index] = edited.clone();
+    reject_new_conflicts(&before, &catalog)?;
     store.entries[index] = edited.clone();
     write_store(&store.entries)?;
     Ok(edited)
 }
 
+/// Convert a local app entry into the model-safe candidate representation.
 fn candidate(entry: &AppCatalogEntry) -> AppCandidate {
     AppCandidate {
         id: entry.id.clone(),
@@ -360,10 +376,12 @@ fn candidate(entry: &AppCatalogEntry) -> AppCandidate {
     }
 }
 
+/// Normalize a name or alias for deterministic, case-insensitive matching.
 fn app_name_key(value: &str) -> String {
     value.trim().to_lowercase()
 }
 
+/// Validate and trim a display name or alias.
 fn validate_display_name(value: &str) -> Result<String, DeskActError> {
     let value = value.trim();
     if value.is_empty() || value.chars().any(char::is_control) {
@@ -374,6 +392,7 @@ fn validate_display_name(value: &str) -> Result<String, DeskActError> {
     Ok(value.to_owned())
 }
 
+/// Validate aliases and reject duplicates under the app name matching rules.
 fn normalize_aliases(aliases: Vec<String>) -> Result<Vec<String>, DeskActError> {
     let mut normalized = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -389,6 +408,7 @@ fn normalize_aliases(aliases: Vec<String>) -> Result<Vec<String>, DeskActError> 
     Ok(normalized)
 }
 
+/// Require a custom target to be an existing absolute `.exe` file.
 fn validate_executable_target(value: &str) -> Result<String, DeskActError> {
     let target = value.trim();
     let path = Path::new(target);
@@ -407,36 +427,64 @@ fn validate_executable_target(value: &str) -> Result<String, DeskActError> {
     Ok(target.to_owned())
 }
 
-fn ensure_no_alias_conflicts(
-    candidate: &AppCatalogEntry,
-    existing: &[AppCatalogEntry],
+/// Reject only name/alias conflicts introduced by the proposed catalog change.
+fn reject_new_conflicts(
+    before: &[AppCatalogEntry],
+    after: &[AppCatalogEntry],
 ) -> Result<(), DeskActError> {
-    let candidate_terms = std::iter::once(candidate.name.as_str())
-        .chain(candidate.aliases.iter().map(String::as_str));
-    for term in candidate_terms {
-        let key = app_name_key(term);
-        if existing.iter().any(|entry| {
-            entry.id != candidate.id
-                && (app_name_key(&entry.name) == key
-                    || entry.aliases.iter().any(|alias| app_name_key(alias) == key))
-        }) {
-            return Err(DeskActError(format!(
-                "App name or alias `{term}` conflicts with an existing catalog name or alias"
-            )));
-        }
+    let existing = catalog_conflicts(before);
+    let after_conflicts = catalog_conflicts(after);
+    if let Some((_, _, term)) = after_conflicts.difference(&existing).min() {
+        return Err(DeskActError(format!(
+            "App name or alias `{term}` introduces catalog conflicts"
+        )));
     }
     Ok(())
 }
 
+/// Return every pairwise collision between canonical names and configured aliases.
+fn catalog_conflicts(
+    entries: &[AppCatalogEntry],
+) -> std::collections::HashSet<(String, String, String)> {
+    let mut conflicts = std::collections::HashSet::new();
+    for (index, left) in entries.iter().enumerate() {
+        let left_terms: std::collections::HashSet<_> = std::iter::once(left.name.as_str())
+            .chain(left.aliases.iter().map(String::as_str))
+            .map(app_name_key)
+            .collect();
+        for right in &entries[index + 1..] {
+            let right_terms: std::collections::HashSet<_> = std::iter::once(right.name.as_str())
+                .chain(right.aliases.iter().map(String::as_str))
+                .map(app_name_key)
+                .collect();
+            let (first_id, second_id) = if left.id <= right.id {
+                (left.id.clone(), right.id.clone())
+            } else {
+                (right.id.clone(), left.id.clone())
+            };
+            for term in left_terms.intersection(&right_terms) {
+                conflicts.insert((first_id.clone(), second_id.clone(), term.clone()));
+            }
+        }
+    }
+    conflicts
+}
+
+/// Create a stable identity from app metadata, preserving case-sensitive shortcut arguments.
 fn discovered_entry_id(app: &DiscoveredApp) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
-    for field in [
-        app.name.clone(),
-        app.target.clone(),
-        app.arguments.clone(),
-        app.working_directory.clone(),
+    for (field, case_sensitive) in [
+        (app.name.as_str(), false),
+        (app.target.as_str(), false),
+        (app.arguments.as_str(), true),
+        (app.working_directory.as_str(), false),
     ] {
-        for byte in field.to_lowercase().bytes().chain([0xff]) {
+        let normalized = if case_sensitive {
+            field.to_owned()
+        } else {
+            field.to_lowercase()
+        };
+        for byte in normalized.bytes().chain([0xff]) {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
@@ -444,6 +492,7 @@ fn discovered_entry_id(app: &DiscoveredApp) -> String {
     format!("discovered-{hash:016x}")
 }
 
+/// Create a process-unique stable identifier for a newly configured entry.
 fn new_user_entry_id() -> String {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -458,6 +507,7 @@ fn new_user_entry_id() -> String {
     )
 }
 
+/// Resolve the local settings path, honoring the developer/test override.
 fn catalog_file_path() -> Result<PathBuf, DeskActError> {
     if let Some(path) = env::var_os("DESKACT_APP_CATALOG") {
         return Ok(PathBuf::from(path));
@@ -474,10 +524,55 @@ fn catalog_file_path() -> Result<PathBuf, DeskActError> {
         })
 }
 
+/// Acquire an exclusive OS file lock to serialize settings transactions across processes.
+fn acquire_catalog_lock() -> Result<CatalogLock, DeskActError> {
+    let catalog_path = catalog_file_path()?;
+    let parent = settings_parent(&catalog_path);
+    fs::create_dir_all(parent).map_err(|error| {
+        DeskActError(format!(
+            "Could not create app catalog settings directory `{}`: {error}",
+            parent.display()
+        ))
+    })?;
+    let name = catalog_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let lock_path = parent.join(format!("{name}.lock"));
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            DeskActError(format!(
+                "Could not open app catalog lock `{}`: {error}",
+                lock_path.display()
+            ))
+        })?;
+    FileExt::lock_exclusive(&file).map_err(|error| {
+        DeskActError(format!(
+            "Could not acquire app catalog lock `{}`: {error}",
+            lock_path.display()
+        ))
+    })?;
+    Ok(CatalogLock { file })
+}
+
+/// Return the settings directory, using the current directory for a bare filename override.
+fn settings_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// Read the configured entries from the versioned local settings file.
 fn read_user_entries() -> Result<Vec<AppCatalogEntry>, DeskActError> {
     Ok(read_store()?.entries)
 }
 
+/// Read and validate the versioned app catalog from disk.
 fn read_store() -> Result<AppCatalogStore, DeskActError> {
     let path = catalog_file_path()?;
     let contents = match fs::read(&path) {
@@ -528,11 +623,10 @@ fn read_store() -> Result<AppCatalogStore, DeskActError> {
     Ok(store)
 }
 
+/// Atomically write an updated store while preserving the previous file on replacement failure.
 fn write_store(entries: &[AppCatalogEntry]) -> Result<(), DeskActError> {
     let path = catalog_file_path()?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| DeskActError("App catalog settings path has no parent directory".into()))?;
+    let parent = settings_parent(&path);
     fs::create_dir_all(parent).map_err(|error| {
         DeskActError(format!(
             "Could not create app catalog settings directory `{}`: {error}",
@@ -551,28 +645,64 @@ fn write_store(entries: &[AppCatalogEntry]) -> Result<(), DeskActError> {
             temp.display()
         ))
     })?;
-    if let Err(error) = fs::rename(&temp, &path) {
-        // Windows does not replace an existing destination on every supported filesystem.
-        if path.exists() {
-            fs::remove_file(&path).map_err(|remove_error| {
-                let _ = fs::remove_file(&temp);
-                DeskActError(format!(
-                    "Could not replace app catalog `{}` after rename failed ({error}): {remove_error}",
-                    path.display()
-                ))
-            })?;
-        }
-        fs::rename(&temp, &path).map_err(|rename_error| {
-            let _ = fs::remove_file(&temp);
-            DeskActError(format!(
-                "Could not save app catalog `{}`: {rename_error}",
-                path.display()
-            ))
-        })?;
+    if let Err(error) = replace_catalog_file(&temp, &path) {
+        let _ = fs::remove_file(&temp);
+        return Err(DeskActError(format!(
+            "Could not save app catalog `{}`; the existing catalog was preserved: {error}",
+            path.display()
+        )));
     }
     Ok(())
 }
 
+/// Replace the destination using the platform's atomic same-volume rename semantics.
+#[cfg(not(windows))]
+fn replace_catalog_file(temp: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(temp, destination)
+}
+
+/// Replace an existing Windows catalog atomically without deleting it before success.
+#[cfg(windows)]
+fn replace_catalog_file(temp: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::{ffi::c_void, os::windows::ffi::OsStrExt};
+
+    if !destination.exists() {
+        return fs::rename(temp, destination);
+    }
+
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        fn ReplaceFileW(
+            replaced_file_name: *const u16,
+            replacement_file_name: *const u16,
+            backup_file_name: *const u16,
+            replace_flags: u32,
+            exclude: *mut c_void,
+            reserved: *mut c_void,
+        ) -> i32;
+    }
+
+    let destination_wide: Vec<u16> = destination.as_os_str().encode_wide().chain([0]).collect();
+    let temp_wide: Vec<u16> = temp.as_os_str().encode_wide().chain([0]).collect();
+    // ReplaceFileW leaves the destination intact if the replacement fails.
+    let succeeded = unsafe {
+        ReplaceFileW(
+            destination_wide.as_ptr(),
+            temp_wide.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if succeeded == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Reject a catalog containing duplicate IDs.
 fn ensure_unique_catalog_ids(entries: &[AppCatalogEntry]) -> Result<(), DeskActError> {
     let mut ids = std::collections::HashSet::new();
     if entries.iter().any(|entry| !ids.insert(entry.id.as_str())) {
@@ -581,4 +711,30 @@ fn ensure_unique_catalog_ids(entries: &[AppCatalogEntry]) -> Result<(), DeskActE
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failed platform replacement must leave the only existing catalog untouched.
+    #[test]
+    fn failed_replacement_preserves_existing_catalog_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = env::temp_dir().join(format!(
+            "deskact-replace-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("apps.json");
+        let missing_temp = dir.join("missing.tmp");
+        fs::write(&destination, b"old catalog data").unwrap();
+
+        assert!(replace_catalog_file(&missing_temp, &destination).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"old catalog data");
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
