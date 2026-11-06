@@ -748,6 +748,252 @@ pub fn run_file_explorer_acceptance() -> Result<(), DeskActError> {
     }
 }
 
+/// Launch or reuse one Calculator window, enter 7 × 6 through fresh accessible controls, and verify 42.
+pub fn run_calculator_acceptance() -> Result<(), DeskActError> {
+    let cli = VerifiedNativeCli::connect()?;
+    let windows = calculator_windows(&cli, NATIVE_PROCESS_TIMEOUT)?;
+    let window = match windows.as_slice() {
+        [] => {
+            launch_calculator()?;
+            wait_for_calculator_window(&cli)?
+        }
+        [window] => window.clone(),
+        _ => {
+            return Err(DeskActError(format!(
+                "Expected one Calculator window; found {}. No calculation was entered.",
+                windows.len()
+            )));
+        }
+    };
+    validate_calculator_window(&window)?;
+
+    let mut snapshot = fresh_snapshot(&cli, &window)?;
+    let display =
+        calculator_accessible_text(&snapshot, "CalculatorResults", "Display is ", "display")?
+            .ok_or_else(|| {
+                DeskActError("Calculator's fresh snapshot did not expose its display".into())
+            })?;
+    let expression = calculator_accessible_text(
+        &snapshot,
+        "CalculatorExpression",
+        "Expression is ",
+        "expression",
+    )?;
+    if display != "0" || expression.as_deref() != Some("") {
+        let clear = unique_control(
+            &snapshot,
+            "button",
+            Some("Clear"),
+            "Calculator Clear button",
+        )?;
+        if control_is_disabled(clear) {
+            return Err(DeskActError(
+                "Calculator is not in a clean state and its Clear control is disabled; no calculation was entered".into(),
+            ));
+        }
+        invoke_success(&cli, &["click", control_ref(clear)?], "click")?;
+        snapshot = fresh_snapshot(&cli, &window)?;
+        let display =
+            calculator_accessible_text(&snapshot, "CalculatorResults", "Display is ", "display")?
+                .ok_or_else(|| {
+                DeskActError(
+                    "Calculator's fresh snapshot did not expose its display after Clear".into(),
+                )
+            })?;
+        let expression = calculator_accessible_text(
+            &snapshot,
+            "CalculatorExpression",
+            "Expression is ",
+            "expression",
+        )?;
+        if display != "0" || expression.as_deref().is_some_and(|value| !value.is_empty()) {
+            return Err(DeskActError(
+                "Fresh Calculator evidence did not confirm the prior calculation was cleared"
+                    .into(),
+            ));
+        }
+    }
+
+    for (name, description) in [
+        ("Seven", "7 key"),
+        ("Multiply by", "multiply key"),
+        ("Six", "6 key"),
+        ("Equals", "equals key"),
+    ] {
+        let control = unique_control(&snapshot, "button", Some(name), description)?;
+        if control_is_disabled(control) {
+            return Err(DeskActError(format!(
+                "Calculator {description} is disabled; no further input was sent"
+            )));
+        }
+        invoke_success(&cli, &["click", control_ref(control)?], "click")?;
+        snapshot = fresh_snapshot(&cli, &window)?;
+    }
+
+    let result =
+        calculator_accessible_text(&snapshot, "CalculatorResults", "Display is ", "display")?
+            .ok_or_else(|| {
+                DeskActError("Calculator's final snapshot did not expose its display".into())
+            })?;
+    if result != "42" {
+        return Err(DeskActError(format!(
+            "Calculator's fresh accessible display showed `{result}`, not the expected result `42`; the calculation is unverified"
+        )));
+    }
+    Ok(())
+}
+
+const CALCULATOR_APP_ID: &str = "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App";
+const CALCULATOR_PROCESS_STEM: &str = "CalculatorApp";
+
+/// Activate packaged Calculator through its AppsFolder app ID with a bounded PowerShell wait.
+fn launch_calculator() -> Result<(), DeskActError> {
+    let powershell =
+        env::var_os("DESKACT_POWERSHELL").unwrap_or_else(|| OsString::from("powershell.exe"));
+    let script =
+        format!("Start-Process explorer.exe -ArgumentList 'shell:AppsFolder\\{CALCULATOR_APP_ID}'");
+    let mut command = Command::new(&powershell);
+    command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    let status = match run_command_status_with_timeout(&mut command, NATIVE_PROCESS_TIMEOUT) {
+        Ok(status) => status,
+        Err(CommandRunError::TimedOut) => {
+            return Err(DeskActError(format!(
+                "PowerShell timed out while activating packaged Calculator after {} seconds",
+                NATIVE_PROCESS_TIMEOUT.as_secs()
+            )));
+        }
+        Err(CommandRunError::Io(error)) => {
+            return Err(DeskActError(format!(
+                "Could not start PowerShell to activate packaged Calculator: {error}"
+            )));
+        }
+    };
+    if !status.success() {
+        return Err(DeskActError(
+            "PowerShell could not activate the packaged Calculator app".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Return windows whose executable label identifies the packaged Windows Calculator app.
+fn calculator_windows(
+    cli: &VerifiedNativeCli,
+    timeout: Duration,
+) -> Result<Vec<NativeWindow>, DeskActError> {
+    Ok(cli
+        .all_windows_with_timeout(timeout)?
+        .into_iter()
+        .filter(|window| {
+            executable_stem(&window.app_name).eq_ignore_ascii_case(CALCULATOR_PROCESS_STEM)
+        })
+        .collect())
+}
+
+/// Wait for exactly one fresh Calculator window after activation.
+fn wait_for_calculator_window(cli: &VerifiedNativeCli) -> Result<NativeWindow, DeskActError> {
+    let deadline = Instant::now() + APP_READINESS_TIMEOUT;
+    loop {
+        let remaining = remaining_readiness_time(deadline, "The Calculator window")?;
+        let windows = calculator_windows(cli, remaining)?;
+        if Instant::now() >= deadline {
+            return Err(DeskActError(
+                "Calculator did not expose one eligible window before the readiness deadline"
+                    .into(),
+            ));
+        }
+        match windows.as_slice() {
+            [window] => return Ok(window.clone()),
+            [] => {
+                let remaining = remaining_readiness_time(deadline, "The Calculator window")?;
+                thread::sleep(Duration::from_millis(100).min(remaining));
+            }
+            _ => {
+                return Err(DeskActError(format!(
+                    "Calculator activation exposed {} windows; the target is ambiguous and no calculation was entered",
+                    windows.len()
+                )));
+            }
+        }
+    }
+}
+
+/// Verify that the selected Calculator window is accessible, visible, and owned by CalculatorApp.exe.
+fn validate_calculator_window(window: &NativeWindow) -> Result<(), DeskActError> {
+    if !window.accessible || window.minimized || !window.visible || window.pid == 0 {
+        return Err(DeskActError(format!(
+            "Calculator window `{}` is not visible, accessible, and verifiably identified; no calculation was entered",
+            window.id
+        )));
+    }
+    let image_path = process_image_path(window.pid)?;
+    if !executable_stem(&image_path).eq_ignore_ascii_case(CALCULATOR_PROCESS_STEM) {
+        return Err(DeskActError(format!(
+            "Calculator window `{}` is owned by `{image_path}`, not CalculatorApp.exe; no calculation was entered",
+            window.id
+        )));
+    }
+    Ok(())
+}
+
+/// Read a Calculator UIA text property by automation ID, allowing absent optional expression text.
+fn calculator_accessible_text(
+    snapshot: &serde_json::Value,
+    automation_id: &str,
+    prefix: &str,
+    description: &str,
+) -> Result<Option<String>, DeskActError> {
+    fn visit(
+        node: &serde_json::Value,
+        automation_id: &str,
+        prefix: &str,
+        matches: &mut Vec<String>,
+    ) {
+        if node
+            .pointer("/native_id/value")
+            .and_then(serde_json::Value::as_str)
+            == Some(automation_id)
+            && let Some(value) = node
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|name| name.strip_prefix(prefix))
+                .or_else(|| node.get("value").and_then(serde_json::Value::as_str))
+        {
+            matches.push(value.to_owned());
+        }
+        if let Some(children) = node.get("children").and_then(serde_json::Value::as_array) {
+            for child in children {
+                visit(child, automation_id, prefix, matches);
+            }
+        }
+    }
+
+    let mut matches = Vec::new();
+    if let Some(tree) = snapshot.get("tree") {
+        visit(tree, automation_id, prefix, &mut matches);
+    }
+    match matches.as_slice() {
+        [value] => Ok(Some(value.clone())),
+        [] => Ok(None),
+        _ => Err(DeskActError(format!(
+            "Expected at most one accessible Calculator {description}; found {}",
+            matches.len()
+        ))),
+    }
+}
+
+/// Report whether an accessible control is explicitly disabled.
+fn control_is_disabled(control: &serde_json::Value) -> bool {
+    control
+        .get("states")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|states| {
+            states
+                .iter()
+                .any(|state| state.as_str() == Some("disabled"))
+        })
+}
+
 /// Convert a WSL filesystem path to the Windows path Explorer can navigate to.
 fn native_ui_path(path: &Path) -> Result<String, DeskActError> {
     let path = path
