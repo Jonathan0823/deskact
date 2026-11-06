@@ -217,6 +217,24 @@ impl VerifiedNativeCli {
         })
     }
 
+    /// List every fresh top-level window for cross-application outcome verification.
+    fn all_windows(&self) -> Result<Vec<NativeWindow>, DeskActError> {
+        let output = self.invoke("list-windows")?;
+        let envelope: Envelope<Vec<NativeWindow>> = parse_envelope(&output, "list-windows")?;
+        if envelope.version != SUPPORTED_JSON_CONTRACT_VERSION {
+            return Err(DeskActError(format!(
+                "Unsupported agent-desktop JSON contract {} in window inventory (DeskAct requires {}).",
+                envelope.version, SUPPORTED_JSON_CONTRACT_VERSION
+            )));
+        }
+        if !envelope.ok {
+            return Err(cli_error("list-windows", envelope.error));
+        }
+        envelope.data.ok_or_else(|| {
+            DeskActError("agent-desktop window inventory did not include data".into())
+        })
+    }
+
     /// List running GUI applications using this preflight-verified CLI connection.
     pub fn running_apps(&self) -> Result<Vec<RunningApp>, DeskActError> {
         let output = self.invoke("list-apps")?;
@@ -552,6 +570,332 @@ pub fn native_inventory() -> Result<NativeInventory, DeskActError> {
         skipped_start_menu_shortcuts: discovery.skipped_start_menu_shortcuts,
         running_apps,
     })
+}
+
+/// Create and open a unique text fixture through File Explorer's accessible UI, then verify fresh UI evidence.
+pub fn run_file_explorer_acceptance() -> Result<(), DeskActError> {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let directory = env::temp_dir().join(format!("deskact-explorer-{unique}"));
+    let marker = format!("DESKACT_FILE_EXPLORER_FIXTURE_{unique}");
+    fs::create_dir(&directory).map_err(|error| {
+        DeskActError(format!(
+            "Could not create unique Explorer fixture folder: {error}"
+        ))
+    })?;
+    let file = directory.join(format!("deskact-fixture-{unique}.txt"));
+    let result = (|| {
+        fs::write(&file, &marker).map_err(|error| {
+            DeskActError(format!("Could not create Explorer fixture file: {error}"))
+        })?;
+        let cli = VerifiedNativeCli::connect()?;
+        let mut windows = cli.windows_for_app("explorer")?;
+        if windows.is_empty() {
+            // Explorer's shell process launch may not expose a window to agent-desktop. This fallback only opens Explorer; it never supplies a fixture path or performs navigation.
+            let powershell = env::var_os("DESKACT_POWERSHELL")
+                .unwrap_or_else(|| OsString::from("powershell.exe"));
+            let launched = Command::new(powershell)
+                .args(["-NoProfile", "-Command", "Start-Process explorer.exe"])
+                .output()
+                .map_err(|error| {
+                    DeskActError(format!("Could not launch File Explorer: {error}"))
+                })?;
+            if !launched.status.success() {
+                return Err(DeskActError(
+                    "PowerShell Start-Process could not launch File Explorer".into(),
+                ));
+            }
+            let deadline = Instant::now() + APP_READINESS_TIMEOUT;
+            while windows.is_empty() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(100));
+                windows = cli.windows_for_app("explorer")?;
+            }
+        }
+        if windows.len() != 1 {
+            return Err(DeskActError(format!(
+                "Expected exactly one accessible Explorer window; found {}. No window was selected.",
+                windows.len()
+            )));
+        }
+        let window = &windows[0];
+        if !window.accessible || window.minimized || !window.visible || window.pid == 0 {
+            return Err(DeskActError(
+                "The unique Explorer window was not visible, accessible, and verifiably identified"
+                    .into(),
+            ));
+        }
+        let owner_path = process_image_path(window.pid)?;
+        let windows_directory = env::var_os("WINDIR").ok_or_else(|| {
+            DeskActError("WINDIR is unavailable; Explorer ownership cannot be verified".into())
+        })?;
+        let expected_explorer = Path::new(&windows_directory)
+            .join("explorer.exe")
+            .to_string_lossy()
+            .into_owned();
+        if !windows_paths_equal(&owner_path, &expected_explorer) {
+            return Err(DeskActError(format!(
+                "Explorer window `{}` is not owned by the Windows Explorer executable; no action was taken.",
+                window.id
+            )));
+        }
+        let fixture_path = native_ui_path(&directory)?;
+        press_app_shortcut(&cli, window, &window.app_name, "ctrl+l")?;
+        let address_snapshot = fresh_snapshot(&cli, window)?;
+        let address = unique_focused_control(
+            &address_snapshot,
+            "textfield",
+            "Address Bar",
+            "Explorer address bar",
+        )?;
+        invoke_success(
+            &cli,
+            &["set-value", control_ref(address)?, &fixture_path],
+            "set-value",
+        )?;
+        press_app_shortcut(&cli, window, &window.app_name, "enter")?;
+        let filename = file
+            .file_name()
+            .and_then(OsStr::to_str)
+            .ok_or_else(|| DeskActError("Fixture filename is not Unicode".into()))?;
+        let navigated = wait_for_fixture_in_explorer(&cli, window, filename)?;
+        unique_control(&navigated, "option", Some(filename), "fixture file")?;
+        press_app_shortcut(&cli, window, &window.app_name, "ctrl+l")?;
+        let location_snapshot = fresh_snapshot(&cli, window)?;
+        let address = unique_focused_control(
+            &location_snapshot,
+            "textfield",
+            "Address Bar",
+            "Explorer address bar",
+        )?;
+        if address
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|observed| !windows_paths_equal(observed, &fixture_path))
+        {
+            return Err(DeskActError(
+                "Fresh Explorer evidence did not confirm the exact fixture folder path".into(),
+            ));
+        }
+        press_app_shortcut(&cli, window, &window.app_name, "escape")?;
+        let listing = fresh_snapshot(&cli, window)?;
+        let item = unique_control(&listing, "option", Some(filename), "fixture file")?;
+        invoke_success(&cli, &["click", control_ref(item)?], "click")?;
+        let selected = fresh_snapshot(&cli, window)?;
+        let item = unique_control(&selected, "option", Some(filename), "fixture file")?;
+        if !item
+            .get("states")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|states| {
+                states
+                    .iter()
+                    .any(|state| state.as_str() == Some("selected"))
+            })
+        {
+            return Err(DeskActError(
+                "Fresh Explorer evidence did not confirm selection of the exact fixture filename"
+                    .into(),
+            ));
+        }
+        press_app_shortcut(&cli, window, &window.app_name, "enter")?;
+        wait_for_opened_file(&cli, filename, &marker)?;
+        Ok(())
+    })();
+    let cleanup_file = match fs::remove_file(&file) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DeskActError(format!(
+            "Could not remove test-created fixture file: {error}"
+        ))),
+    };
+    let cleanup_dir = match fs::remove_dir(&directory) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DeskActError(format!(
+            "Could not remove test-created fixture folder: {error}"
+        ))),
+    };
+    let cleanup = cleanup_file.and(cleanup_dir);
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(operation), Ok(())) => Err(operation),
+        (Ok(()), Err(cleanup)) => Err(cleanup),
+        (Err(operation), Err(cleanup)) => Err(DeskActError(format!(
+            "{operation}; additionally, cleanup failed: {cleanup}"
+        ))),
+    }
+}
+
+fn native_ui_path(path: &Path) -> Result<String, DeskActError> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| DeskActError("Fixture path is not Unicode".into()))?;
+    #[cfg(target_os = "linux")]
+    if let Some(mounted) = path.strip_prefix("/mnt/") {
+        let (drive, remainder) = mounted.split_once('/').ok_or_else(|| {
+            DeskActError("Mounted Windows fixture path did not include a directory".into())
+        })?;
+        if drive.len() == 1 && drive.as_bytes()[0].is_ascii_alphabetic() {
+            return Ok(format!(
+                "{}:\\{}",
+                drive.to_ascii_uppercase(),
+                remainder.replace('/', "\\")
+            ));
+        }
+    }
+    Ok(path.to_owned())
+}
+
+fn wait_for_opened_file(
+    cli: &VerifiedNativeCli,
+    filename: &str,
+    marker: &str,
+) -> Result<NativeWindow, DeskActError> {
+    let deadline = Instant::now() + APP_READINESS_TIMEOUT;
+    loop {
+        let matching: Vec<_> = cli
+            .all_windows()?
+            .into_iter()
+            .filter(|window| {
+                !executable_stem(&window.app_name).eq_ignore_ascii_case("explorer")
+                    && window.title.contains(filename)
+            })
+            .collect();
+        if matching.len() > 1 {
+            return Err(DeskActError(format!(
+                "More than one non-Explorer window matched the unique fixture filename `{filename}`; opened-file evidence is ambiguous."
+            )));
+        }
+        if let Some(window) = matching.into_iter().next() {
+            if !window.accessible || window.minimized || !window.visible || window.pid == 0 {
+                return Err(DeskActError(
+                    "The fixture's opened-app window was not visible, accessible, and verifiably identified".into(),
+                ));
+            }
+            let snapshot = fresh_snapshot(cli, &window)?;
+            if tree_contains_value(&snapshot["tree"], marker) {
+                return Ok(window);
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(DeskActError(format!(
+                "No fresh accessible window containing the fixture filename `{filename}` and exact marker contents appeared before the readiness deadline."
+            )));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn wait_for_fixture_in_explorer(
+    cli: &VerifiedNativeCli,
+    window: &NativeWindow,
+    filename: &str,
+) -> Result<serde_json::Value, DeskActError> {
+    let deadline = Instant::now() + APP_READINESS_TIMEOUT;
+    loop {
+        let snapshot = fresh_snapshot(cli, window)?;
+        let count = count_controls(&snapshot, "option", Some(filename));
+        match count {
+            1 => return Ok(snapshot),
+            count if count > 1 => {
+                return Err(DeskActError(format!(
+                    "Found {count} accessible items named `{filename}` in the fixture folder; no file was opened."
+                )));
+            }
+            _ if Instant::now() >= deadline => {
+                return Err(DeskActError(format!(
+                    "The fixture file `{filename}` did not appear in a fresh Explorer snapshot before the readiness deadline."
+                )));
+            }
+            _ => thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
+fn count_controls(snapshot: &serde_json::Value, role: &str, name: Option<&str>) -> usize {
+    fn visit(node: &serde_json::Value, role: &str, name: Option<&str>) -> usize {
+        let matching = usize::from(
+            node.get("role").and_then(serde_json::Value::as_str) == Some(role)
+                && name.is_none_or(|expected| {
+                    node.get("name").and_then(serde_json::Value::as_str) == Some(expected)
+                })
+                && node
+                    .get("ref_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some(),
+        );
+        matching
+            + node
+                .get("children")
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, |children| {
+                    children.iter().map(|child| visit(child, role, name)).sum()
+                })
+    }
+    snapshot
+        .get("tree")
+        .map_or(0, |tree| visit(tree, role, name))
+}
+
+fn unique_focused_control<'a>(
+    snapshot: &'a serde_json::Value,
+    role: &str,
+    name: &str,
+    description: &str,
+) -> Result<&'a serde_json::Value, DeskActError> {
+    fn visit<'a>(
+        node: &'a serde_json::Value,
+        role: &str,
+        name: &str,
+        matches: &mut Vec<&'a serde_json::Value>,
+    ) {
+        if node.get("role").and_then(serde_json::Value::as_str) == Some(role)
+            && node.get("name").and_then(serde_json::Value::as_str) == Some(name)
+            && node
+                .get("states")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|states| states.iter().any(|state| state.as_str() == Some("focused")))
+            && node
+                .get("ref_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        {
+            matches.push(node);
+        }
+        if let Some(children) = node.get("children").and_then(serde_json::Value::as_array) {
+            for child in children {
+                visit(child, role, name, matches);
+            }
+        }
+    }
+    let mut matches = Vec::new();
+    if let Some(tree) = snapshot.get("tree") {
+        visit(tree, role, name, &mut matches);
+    }
+    match matches.as_slice() {
+        [control] => Ok(*control),
+        _ => Err(DeskActError(format!(
+            "Expected one focused {description}; found {}",
+            matches.len()
+        ))),
+    }
+}
+
+fn tree_contains_value(node: &serde_json::Value, expected: &str) -> bool {
+    node.get("value").and_then(serde_json::Value::as_str) == Some(expected)
+        || node
+            .get("children")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|children| {
+                children
+                    .iter()
+                    .any(|child| tree_contains_value(child, expected))
+            })
 }
 
 const MAX_NOTEPAD_ACCEPTANCE_RUNS: usize = 100;
@@ -1024,6 +1368,44 @@ fn press_shortcut(
         "--headed",
         "--app",
         "notepad",
+        "--window-id",
+        &window.id,
+        shortcut,
+    ];
+    invoke_success(cli, &args, "press")?;
+    Ok(())
+}
+
+fn press_app_shortcut(
+    cli: &VerifiedNativeCli,
+    window: &NativeWindow,
+    app: &str,
+    shortcut: &str,
+) -> Result<(), DeskActError> {
+    let focused = invoke_success(
+        cli,
+        &["focus-window", "--app", app, "--window-id", &window.id],
+        "focus-window",
+    )?;
+    if focused
+        .pointer("/focused/id")
+        .and_then(serde_json::Value::as_str)
+        != Some(window.id.as_str())
+        || focused
+            .pointer("/focused/is_focused")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        return Err(DeskActError(format!(
+            "agent-desktop did not confirm focus on window `{}` before sending `{shortcut}`",
+            window.id
+        )));
+    }
+    let args = [
+        "press",
+        "--headed",
+        "--app",
+        app,
         "--window-id",
         &window.id,
         shortcut,
