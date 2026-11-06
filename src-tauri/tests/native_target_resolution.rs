@@ -95,6 +95,7 @@ esac
             .env("DESKACT_TEST_WINDOWS", windows)
             .env("DESKACT_TEST_SNAPSHOT", snapshot)
             .env("DESKACT_TEST_CATALOG", &self.catalog)
+            .env("DESKACT_APP_CATALOG", self.dir.join("app-catalog.json"))
             .env("DESKACT_TEST_PROCESS_PATH", &self.process_path)
             .output()
             .expect("run developer harness")
@@ -109,6 +110,7 @@ esac
             .env("DESKACT_TEST_WINDOWS", windows)
             .env("DESKACT_TEST_SNAPSHOT", snapshot)
             .env("DESKACT_TEST_CATALOG", &self.catalog)
+            .env("DESKACT_APP_CATALOG", self.dir.join("app-catalog.json"))
             .env("DESKACT_TEST_PROCESS_PATH", &self.process_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -381,7 +383,7 @@ fn resolve_rejects_entries_with_distinct_working_directories_as_ambiguous() {
     let output = fixture.run("Calculator", "", "");
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Multiple discovered entries"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("exactly matches"));
     assert!(
         fixture
             .calls()

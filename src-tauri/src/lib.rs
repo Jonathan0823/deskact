@@ -15,6 +15,12 @@ use std::{
 
 use serde::Deserialize;
 
+mod app_catalog;
+pub use app_catalog::{
+    AppCandidate, AppCatalogEntry, AppCatalogSource, AppSelectionInput, AppSelectionOutcome,
+    ModelAppSelection, add_user_app_entry, edit_user_app_entry, load_app_catalog,
+    prepare_app_selection, validate_model_app_selection,
+};
 mod windows_catalog;
 pub use windows_catalog::{
     CatalogDiscovery, DiscoveredApp, DiscoverySource, discover_app_catalog, process_image_path,
@@ -126,7 +132,7 @@ pub struct DeskActError(String);
 
 impl DeskActError {
     /// Construct an error from an actionable diagnostic message.
-    pub(crate) fn new(message: String) -> Self {
+    pub fn new(message: String) -> Self {
         Self(message)
     }
 }
@@ -2470,35 +2476,26 @@ fn successful_data(output: Output, command: &str) -> Result<serde_json::Value, D
     })
 }
 
-/// Launch a uniquely named discovered app and resolve its fresh accessible window.
+/// Launch a uniquely resolved app and identify its fresh accessible window.
 pub fn resolve_native_target(app_name: &str) -> Result<NativeTargetResolution, DeskActError> {
     let cli = VerifiedNativeCli::connect()?;
-    let discovery = windows_catalog::discover_app_catalog()?;
-    let catalog = normalize_catalog(discovery.entries);
-    let matches: Vec<_> = catalog
-        .into_iter()
-        .filter(|app| app.name.to_lowercase() == app_name.trim().to_lowercase())
-        .collect();
-    let app = match matches.as_slice() {
-        [] => {
-            return Err(DeskActError(format!(
-                "No discovered app exactly matches `{}`. Choose a name from `deskact-dev inventory`.",
-                app_name.trim()
-            )));
-        }
-        [app] => app.clone(),
-        _ => {
-            return Err(DeskActError(format!(
-                "Multiple discovered entries are named `{}`. No app was launched.",
-                app_name.trim()
-            )));
-        }
-    };
-    cli.resolve_target(app)
+    let catalog = load_app_catalog()?;
+    match prepare_app_selection(&catalog, app_name)? {
+        AppSelectionInput::ExactMatch { entry } => cli.resolve_target(entry.as_discovered_app()),
+        AppSelectionInput::NeedsClarification { candidates } => Err(DeskActError(format!(
+            "More than one catalog entry exactly matches `{}` ({} candidates); ask the user which app they mean. No app was launched.",
+            app_name.trim(),
+            candidates.len()
+        ))),
+        AppSelectionInput::NeedsModel { .. } => Err(DeskActError(format!(
+            "The app request `{}` needs primary-model selection from the catalog. No app was launched; use `deskact-dev app-catalog prepare` to inspect the safe candidate set.",
+            app_name.trim()
+        ))),
+    }
 }
 
 /// Sort and remove only catalog entries with identical launch configuration.
-fn normalize_catalog(mut catalog: Vec<DiscoveredApp>) -> Vec<DiscoveredApp> {
+pub(crate) fn normalize_catalog(mut catalog: Vec<DiscoveredApp>) -> Vec<DiscoveredApp> {
     catalog.sort_by_key(|app| {
         (
             app.name.to_lowercase(),

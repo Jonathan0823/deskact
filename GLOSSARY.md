@@ -2,6 +2,17 @@
 
 This glossary defines the product language for DeskAct's user requests, model-produced plans, and configurable LLM endpoints.
 
+## App selection language
+
+**App catalog**: The discovered and explicitly configured app entries DeskAct may consider for an app request. Each entry is the local source of truth for its app identity and launch target.
+_Avoid_: model-generated app list
+
+**Catalog-grounded app selection**: The primary model's interpretation of natural-language app intent by choosing a supplied catalog entry or asking for clarification. The model does not create app identities, executable paths, or launch permission.
+_Avoid_: AI-generated target
+
+**User-defined app alias**: An optional, explicitly saved phrase associated with a catalog entry to support exact matching. It is a convenience, not a requirement for natural-language app selection, and is not learned automatically.
+_Avoid_: learned alias
+
 ## LLM planning and API language
 
 **Primary model**: The single user-configured LLM endpoint and model used to interpret unmatched requests and propose action plans.

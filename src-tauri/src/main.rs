@@ -7,12 +7,14 @@ use std::{
 };
 
 use deskact_core::{
-    NativeTargetResolution, VerifiedNativeCli, native_inventory, preflight, resolve_native_target,
+    NativeTargetResolution, VerifiedNativeCli, add_user_app_entry, edit_user_app_entry,
+    load_app_catalog, native_inventory, preflight, prepare_app_selection, resolve_native_target,
     run_calculator_acceptance, run_file_explorer_acceptance, run_notepad_acceptance,
     run_vlc_acceptance,
 };
 
 /// Run the developer-only native preflight, inventory, target-resolution, or acceptance command.
+/// Dispatch and run one developer-harness command.
 fn main() -> ExitCode {
     let command = env::args().nth(1);
     match command.as_deref() {
@@ -26,6 +28,10 @@ fn main() -> ExitCode {
             }
             Err(error) => fail(error.to_string()),
         },
+        Some("app-catalog") => {
+            let arguments: Vec<_> = env::args().skip(2).collect();
+            run_app_catalog_command(&arguments)
+        }
         Some("resolve") => {
             let mut arguments = env::args().skip(2);
             match (arguments.next(), arguments.next()) {
@@ -133,11 +139,210 @@ fn main() -> ExitCode {
 
         _ => {
             eprintln!(
-                "Usage: deskact-dev <preflight|inventory|resolve <discovered-app-name>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
+                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
             );
             ExitCode::from(2)
         }
     }
+}
+
+/// Run the local app-catalog inspection and user-entry commands.
+fn run_app_catalog_command(arguments: &[String]) -> ExitCode {
+    let result = match arguments {
+        [command] if command == "list" => load_app_catalog().and_then(|catalog| {
+            serde_json::to_string_pretty(&catalog).map_err(|error| {
+                deskact_core::DeskActError::new(format!("Could not serialize app catalog: {error}"))
+            })
+        }),
+        [command, name, target, rest @ ..] if command == "add" => match parse_aliases(rest) {
+            Ok(aliases) => add_user_app_entry(name, target, aliases).and_then(|entry| {
+                serde_json::to_string_pretty(&entry).map_err(|error| {
+                    deskact_core::DeskActError::new(format!(
+                        "Could not serialize app entry: {error}"
+                    ))
+                })
+            }),
+            Err(error) => Err(error),
+        },
+        [command, id, rest @ ..] if command == "edit" => match parse_edit_options(rest) {
+            Ok(options) => edit_user_app_entry(
+                id,
+                options.name.as_deref(),
+                options.target.as_deref(),
+                options.aliases,
+            )
+            .and_then(|entry| {
+                serde_json::to_string_pretty(&entry).map_err(|error| {
+                    deskact_core::DeskActError::new(format!(
+                        "Could not serialize app entry: {error}"
+                    ))
+                })
+            }),
+            Err(error) => Err(error),
+        },
+        [command, request @ ..] if command == "prepare" && !request.is_empty() => {
+            let request = request.join(" ");
+            load_app_catalog().and_then(|catalog| {
+                let selection = prepare_app_selection(&catalog, &request)?;
+                serde_json::to_string_pretty(&selection).map_err(|error| {
+                    deskact_core::DeskActError::new(format!(
+                        "Could not serialize app-selection input: {error}"
+                    ))
+                })
+            })
+        }
+        [command, arguments @ ..] if command == "validate-selection" => {
+            parse_validation_arguments(arguments).and_then(|(request, response_json)| {
+                load_app_catalog().and_then(|catalog| {
+                    let prepared = prepare_app_selection(&catalog, &request)?;
+                    let outcome = deskact_core::validate_model_app_selection(
+                        &prepared,
+                        &catalog,
+                        &response_json,
+                    )?;
+                    Ok(match outcome {
+                        deskact_core::AppSelectionOutcome::Selected(entry) => {
+                            format!("Validated selection: {} ({})", entry.name, entry.id)
+                        }
+                        deskact_core::AppSelectionOutcome::Clarify(ids) => {
+                            format!("Validated clarification among: {}", ids.join(", "))
+                        }
+                    })
+                })
+            })
+        }
+        _ => {
+            eprintln!(
+                "Usage: deskact-dev app-catalog <list|add <name> <absolute-exe> [--alias <phrase> ...]|edit <id> [--name <name>] [--target <absolute-exe>] [--alias <phrase> ...|--clear-aliases]|prepare <natural-language-request>|validate-selection <natural-language-request> --response-json <fixture-json>"
+            );
+            return ExitCode::from(2);
+        }
+    };
+    match result {
+        Ok(output) => {
+            println!("{output}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("App catalog operation failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Parse repeated `--alias <phrase>` pairs for a new app entry.
+fn parse_aliases(arguments: &[String]) -> Result<Vec<String>, deskact_core::DeskActError> {
+    let mut aliases = Vec::new();
+    let mut remaining = arguments;
+    while let [flag, value, tail @ ..] = remaining {
+        if flag != "--alias" {
+            return Err(deskact_core::DeskActError::new(format!(
+                "Unknown app-catalog add option `{flag}`"
+            )));
+        }
+        aliases.push(value.clone());
+        remaining = tail;
+    }
+    if !remaining.is_empty() {
+        return Err(deskact_core::DeskActError::new(
+            "Each --alias option requires one phrase".into(),
+        ));
+    }
+    Ok(aliases)
+}
+
+/// Parse the original request and one fixture response separated by `--response-json`.
+fn parse_validation_arguments(
+    arguments: &[String],
+) -> Result<(String, String), deskact_core::DeskActError> {
+    let Some(separator) = arguments
+        .iter()
+        .position(|argument| argument == "--response-json")
+    else {
+        return Err(deskact_core::DeskActError::new(
+            "validate-selection requires --response-json <fixture-json>".into(),
+        ));
+    };
+    if separator == 0 || arguments.len() != separator + 2 {
+        return Err(deskact_core::DeskActError::new(
+            "Provide one app request before --response-json and exactly one JSON response after it"
+                .into(),
+        ));
+    }
+    Ok((
+        arguments[..separator].join(" "),
+        arguments[separator + 1].clone(),
+    ))
+}
+
+/// Optional fields for editing one user-configured app entry.
+struct AppCatalogEditOptions {
+    name: Option<String>,
+    target: Option<String>,
+    aliases: Option<Vec<String>>,
+}
+
+/// Parse optional edit fields; providing any aliases replaces the whole optional alias set.
+fn parse_edit_options(
+    arguments: &[String],
+) -> Result<AppCatalogEditOptions, deskact_core::DeskActError> {
+    let mut name = None;
+    let mut target = None;
+    let mut aliases = None;
+    let mut clear_aliases = false;
+    let mut index = 0;
+    while index < arguments.len() {
+        let flag = arguments[index].as_str();
+        match flag {
+            "--name" | "--target" | "--alias" => {
+                let Some(value) = arguments.get(index + 1) else {
+                    return Err(deskact_core::DeskActError::new(format!(
+                        "{flag} requires a value"
+                    )));
+                };
+                match flag {
+                    "--name" if name.is_none() => name = Some(value.clone()),
+                    "--target" if target.is_none() => target = Some(value.clone()),
+                    "--alias" if !clear_aliases => {
+                        aliases.get_or_insert_with(Vec::new).push(value.clone());
+                    }
+                    "--alias" => {
+                        return Err(deskact_core::DeskActError::new(
+                            "--alias cannot be combined with --clear-aliases".into(),
+                        ));
+                    }
+                    _ => {
+                        return Err(deskact_core::DeskActError::new(format!(
+                            "Option `{flag}` may be supplied only once"
+                        )));
+                    }
+                }
+                index += 2;
+            }
+            "--clear-aliases" if !clear_aliases && aliases.is_none() => {
+                clear_aliases = true;
+                index += 1;
+            }
+            _ => {
+                return Err(deskact_core::DeskActError::new(format!(
+                    "Unknown or conflicting app-catalog edit option `{flag}`"
+                )));
+            }
+        }
+    }
+    if clear_aliases {
+        aliases = Some(Vec::new());
+    }
+    if name.is_none() && target.is_none() && aliases.is_none() {
+        return Err(deskact_core::DeskActError::new(
+            "Edit requires at least one of --name, --target, --alias, or --clear-aliases".into(),
+        ));
+    }
+    Ok(AppCatalogEditOptions {
+        name,
+        target,
+        aliases,
+    })
 }
 
 /// Present a resolved target or pause for manual restoration and then resume resolution.
