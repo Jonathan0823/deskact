@@ -4,13 +4,13 @@
 
 **Tagline:** Tell your computer what to do. DeskAct gets it done.
 
-**GitHub repository (proposed):** `deskact`  
+**GitHub repository (proposed):** `deskact`<br>
 **Repository description:** An open-source AI desktop agent for Windows. Control native apps, browsers, and system tasks with natural language or voice. Built with Rust + Tauri.
 
-**Version:** 1.13 — Native Phase 1 reduced-support boundary
-**Date:** 5 November 2026
-**Status:** Phase 0 closed no-go for broad native automation on the tested setup; Phase 1 authorized only under the reduced native support boundary below. Browser support boundary, LLM contract, project license, and no-bundled-sidecar distribution are recorded.
-**Initial platform:** Windows 10/11; other desktop platforms are out of MVP scope  
+**Version:** 1.14 — AI-assisted app selection grounded in the local catalog
+**Date:** 6 November 2026
+**Status:** Phase 0 closed no-go for broad native automation on the tested setup; Phase 1 authorized only under the reduced native support boundary below. Browser support boundary, LLM contract, app-selection policy, project license, and no-bundled-sidecar distribution are recorded.
+**Initial platform:** Windows 10/11; other desktop platforms are out of MVP scope<br>
 **Product form:** **One user-facing DeskAct application and installer.** Modular Rust orchestrator in the Tauri host process; a development-only terminal harness in Phase 1; Tauri text HUD enabled in Phase 2. Users install automation CLIs separately; DeskAct does not bundle or auto-install them.
 
 ---
@@ -19,7 +19,7 @@
 
 DeskAct is an open-source, Windows-first, accessibility-first assistant for technically comfortable power users who want to find, open, and control their PC faster. It converts natural-language instructions into *observable, controlled, and verifiable* actions across supported native applications, Chromium-based browsers, and operating-system utilities. App coverage is capability-dependent: broad support is the ambition, while reliability claims are limited to a named, tested acceptance set.
 
-The production release is **one DeskAct desktop application** (Tauri v2 host + WebView UI). Its Rust orchestrator, router, planner, policy and tool manager are modules running in the Tauri host process, **not independent services**. A developer-only terminal harness exercises the same core in Phase 1 without shipping a separate user-facing CLI. The engine uses `agent-desktop` for native accessibility automation; `agent-browser` for Chromium automation over the Chrome DevTools Protocol (CDP); and a constrained Rust OS executor for predictable system actions. A Tauri v2 desktop HUD adds text and a hands-free push-to-talk (PTT) voice path after the core has passed terminal-harness tests; recognized speech routes automatically, with concise spoken responses and no keyboard submission on the voice happy path. `agent-desktop` and `agent-browser` are invoked as on-demand external tool processes; browser automation may reuse a tool-managed daemon/session. The LLM is **not a bundled subprocess**: DeskAct sends asynchronous API requests to a user-configured **OpenAI-compatible endpoint**, either a remote service or an independently managed local model server. **The MVP has no separate System 1/Laya router:** registered commands and workflows are handled by deterministic Rust matching, while unknown intents are interpreted by the single configured primary LLM.
+The production release is **one DeskAct desktop application** (Tauri v2 host + WebView UI). Its Rust orchestrator, router, planner, policy and tool manager are modules running in the Tauri host process, **not independent services**. A developer-only terminal harness exercises the same core in Phase 1 without shipping a separate user-facing CLI. The engine uses `agent-desktop` for native accessibility automation; `agent-browser` for Chromium automation over the Chrome DevTools Protocol (CDP); and a constrained Rust OS executor for predictable system actions. A Tauri v2 desktop HUD adds text and a hands-free push-to-talk (PTT) voice path after the core has passed terminal-harness tests; recognized speech routes automatically, with concise spoken responses and no keyboard submission on the voice happy path. `agent-desktop` and `agent-browser` are invoked as on-demand external tool processes; browser automation may reuse a tool-managed daemon/session. The LLM is **not a bundled subprocess**: DeskAct sends asynchronous API requests to a user-configured **OpenAI-compatible endpoint**, either a remote service or an independently managed local model server. **The MVP has no separate System 1/Laya router:** registered workflows and exact canonical app-name matches may be handled by deterministic Rust matching, while non-exact natural-language app selection and other unhandled intents use the single configured primary LLM. App selections are grounded in the discovered/configured catalog; the model cannot invent launch targets.
 
 **Core principle:** DeskAct does not declare success merely because a command ran. It identifies the intended outcome, performs the action, observes the resulting state, and reports **completed**, **partially completed**, **failed**, or **cancelled** with evidence.
 
@@ -32,7 +32,7 @@ Finding, opening, and controlling apps, files, folders, and common PC functions 
 ### 2.2 MVP goals
 
 1. Help power users find, open, and control Windows apps, files, folders, and common system functions through natural language.
-2. Execute registered multi-step workflows without a model when their steps and inputs are fully specified; use the primary LLM for unrecognized or dynamic tasks.
+2. Execute registered multi-step workflows and unique exact canonical app-name matches without a model when their inputs are fully specified; use the primary LLM to resolve non-exact natural-language app requests against the local catalog and for other unrecognized or dynamic tasks.
 3. Control supported native applications through an accessibility-first observe → act → verify loop; treat broad app compatibility as capability-dependent, not guaranteed.
 4. Include best-effort browser automation, with native applications as the reliability baseline.
 5. Recover from stale UI references and bounded transient failures without choosing the wrong target or duplicating actions.
@@ -55,7 +55,7 @@ Finding, opening, and controlling apps, files, folders, and common PC functions 
 ## 3. Product Principles
 
 - **Accessibility before pixels.** Prefer semantic UI elements and validated references; physical pointer input is exceptional, not the default.
-- **Deterministic first, not complexity classification.** Exact registered commands and parameterized workflows run locally; unrecognized requests go directly to the configured primary LLM. No System 1 model is present.
+- **Grounded AI, not alias training.** The primary LLM interprets non-exact app references against the current discovered/configured catalog. Exact canonical app names and registered workflows may use deterministic fast paths. The model proposes a catalog entry, never an executable path or permission; Rust validates it. User aliases are optional and explicit, not required or learned.
 - **Observe, act, verify.** Separate tool delivery evidence from application-level outcome verification.
 - **Safe retries only.** Inspect whether an action could already have been delivered before repeating it.
 - **Bounded context.** Store operational facts in Rust; pass only necessary observations and a compact task summary to the model.
@@ -78,9 +78,9 @@ flowchart TD
     HUD --> API
     API --> NORMAL["Normalize Request"]
     NORMAL --> ROUTER["Rust Deterministic Intent Router"]
-    ROUTER --> MATCH{"Registered command or workflow?"}
+    ROUTER --> MATCH{"Registered workflow or exact canonical app name?"}
     MATCH -->|Yes| KNOWN["Validated Direct Action / Known Workflow"]
-    MATCH -->|No| LLM["Primary LLM: Interpret + Plan"]
+    MATCH -->|No| LLM["Primary LLM: Interpret + Select from App Catalog + Plan"]
     KNOWN --> POLICY["Rust Policy & Approval Gate"]
     LLM --> POLICY
     POLICY -->|Allowed / approved| LOOP["Rust Agent Execution Loop"]
@@ -107,15 +107,16 @@ flowchart TD
     TTS --> VOICEOUT["Spoken feedback"]
 ```
 
-**Interpretation:** Voice is transcribed to text before routing; the development-only harness bypasses the HUD while testing the same Rust core. **There is no second AI router.** The router checks only registered commands and parameterized workflows. Unmatched or ambiguous requests go to the *primary* LLM, which can plan actions or answer without executing tools. The Rust policy gate controls all action requests. The Rust loop reobserves and verifies each meaningful step; it calls the primary LLM again only when replanning is genuinely necessary. The output is a verified outcome or a transparent partial, failed, or cancelled status.
+**Interpretation:** Voice is transcribed to text before routing; the development-only harness bypasses the HUD while testing the same Rust core. **There is no second AI router.** Registered workflows and unique exact canonical app-name matches can use local deterministic paths. For non-exact app language, the *primary* LLM interprets the request against the eligible discovered/configured app catalog and may select a catalog entry or ask for clarification; it cannot invent an app target. Other unmatched requests may also go to the primary LLM. The Rust policy gate controls all action requests. The Rust loop reobserves and verifies each meaningful step; it calls the primary LLM again only when replanning is genuinely necessary. The output is a verified outcome or a transparent partial, failed, or cancelled status.
 
 ### 4.1 Input-to-execution examples
 
 | Request | Route | Expected execution |
 |---|---|---|
-| “Open Calculator” | Unique Windows app discovery/alias match | OS executor → launch directly → wait for target window → verify |
+| “Open Calculator” | Unique exact canonical app-name match (or registered workflow) | OS executor → launch directly → wait for target window → verify |
+| “Open the app I use for music” | Primary LLM selects from discovered/configured app candidates | Validate catalog ID → launch configured target → wait for target window → verify |
 | “Open Downloads” | Known folder alias | Validated OS action → verify location opened |
-| “Open my editor” (multiple matching apps) | Ambiguous discovery result | Show candidate apps and ask; optionally save a unique user alias; never choose randomly |
+| “Open my editor” (multiple plausible catalog entries) | Primary LLM requests clarification using catalog candidates | Show candidates and ask; never choose randomly; optional explicit aliases are convenience only |
 | “Open Notepad and insert this exact text” | Registered workflow if supported, otherwise LLM plan | OS + `agent-desktop` → verify content |
 | “Open VLC and play the sample video” | Main LLM unless a tested workflow is registered | `agent-desktop` observe/act/verify loop; verify playback state where observable |
 | “Summarize what this document says” | Main LLM | Read approved content → respond; no desktop mutation required |
@@ -123,28 +124,28 @@ flowchart TD
 
 ### 4.2 Routing invariant
 
-The deterministic router does **not** try to infer whether a request is “simple” or “complex” using a heuristic confidence threshold. It either matches a **specific validated intent/workflow** with typed arguments or returns **unhandled**. Multi-step does not automatically mean LLM-required, and short phrasing does not automatically mean safe.
+The deterministic router does **not** try to infer whether a request is “simple” or “complex” using a heuristic confidence threshold. It handles registered workflows and unique exact canonical app-name matches; otherwise the primary LLM may resolve natural-language app intent against the current catalog or plan an unhandled task. The model must return a supplied catalog ID or request clarification; Rust rejects unknown IDs and never accepts model-provided executable paths or shell commands. Multi-step does not automatically mean LLM-required, and short phrasing does not automatically mean safe.
 
 ## 5. User Experience and Representative Journeys
 
-### 5.1 Journey A — deterministic system command
+### 5.1 Journey A — app selection and deterministic launch
 
-**Instruction:** “Open Calculator.”  
-DeskAct resolves a registered app alias, validates the executable, launches it, waits for its window to become observable, and returns the detected window. An LLM is not required.
+**Instruction:** “Open Calculator.”<br>
+A unique exact canonical app-name match can resolve locally. For non-exact wording, the primary LLM selects from the discovered/configured catalog, or asks the user when multiple apps plausibly match. Rust validates the catalog ID and target, launches directly, waits for a uniquely matched window, and verifies it; the model never supplies the executable path.
 
 ### 5.2 Journey B — native multi-step task
 
-**Instruction:** “Open Notepad, type a short note, and save it to my Desktop.”  
+**Instruction:** “Open Notepad, type a short note, and save it to my Desktop.”<br>
 DeskAct builds a minimal plan, opens the app, observes the target window, selects the relevant editor, types, and verifies the text where observable. Before saving, it follows the applicable overwrite approval policy; afterward it verifies both the intended path and expected content (not merely that a file exists). If evidence is unavailable or ambiguous, it reports the precise uncertainty rather than inventing success.
 
 ### 5.3 Journey C — native application with dynamic UI
 
-**Instruction:** “Open VLC and play the sample video.”  
+**Instruction:** “Open VLC and play the sample video.”<br>
 DeskAct launches or restores VLC, identifies the intended local test file and playback control, then checks for playback-state evidence. If the application exposes insufficient evidence, DeskAct reports *delivered but unverified* or *partially completed* rather than claiming playback started.
 
 ### 5.4 Journey D — browser handoff (best-effort)
 
-**Instruction:** “Open my dashboard tab and find the latest report.”  
+**Instruction:** “Open my dashboard tab and find the latest report.”<br>
 DeskAct confirms an authorized local CDP connection, identifies the correct browser tab, uses `agent-browser` for the web UI, and verifies the navigation/result where observable. Browser automation is best-effort and is not held to the native-app reliability target. It does not assume an existing browser profile is automatically attachable.
 
 ### 5.5 Journey E — hands-free voice task
@@ -158,9 +159,9 @@ flowchart TB
     U[User: Dev Harness / Text / PTT] --> UI["Interface Adapter<br/>Development harness in Phase 1; bundled Tauri HUD from Phase 2"]
     UI --> BUS[Task API + Event Channel]
     BUS --> CORE[DeskAct Core - Rust / Tokio]
-    CORE --> RT[Deterministic Intent Router]
-    RT -->|Matched command / registered workflow| PL[Validated Direct Action or Workflow]
-    RT -->|Unmatched request| PLAN["OpenAI-Compatible Endpoint Adapter<br/>user-configured local or remote LLM"]
+    CORE --> RT[Intent Router]
+    RT -->|Exact canonical app name / registered workflow| PL[Validated Direct Action or Workflow]
+    RT -->|Non-exact app reference / other unhandled request| PLAN["Primary LLM with eligible app-catalog candidates<br/>user-configured local or remote endpoint"]
     PLAN --> POLICY[Policy & Approval Gate]
     PL --> POLICY
     POLICY --> LOOP["Task Executor<br/>Observe → Act → Verify"]
@@ -180,7 +181,7 @@ flowchart TB
 | Component | Responsibility |
 |---|---|
 | In-process Rust core | Task lifecycle, orchestration, step selection, state transitions, deadlines and cancellation inside the Tauri host process |
-| Intent Router | Exact aliases and registered parameterized workflows; returns either a typed match or `unhandled` (no learned classifier) |
+| Intent Router | Deterministic registered-workflow and exact canonical-name fast paths; delegates non-exact app selection to the primary LLM with catalog candidates; no separate learned classifier |
 | LLM Connector / Planner | One configurable OpenAI-compatible API endpoint, model and credentials; supports remote providers or a separately managed local model server; never launches local LLM itself |
 | Policy Engine | Tool allowlists, risk classification, approval gates and audit decisions |
 | Tool Manager / Dispatcher | Routes typed actions, starts bounded subprocesses on demand, manages deadlines/cancellation, checks exit codes/output, reuses sessions as supported, and cleans up only DeskAct-owned children |
@@ -205,7 +206,7 @@ flowchart TB
 | Desktop packaging (Phase 2) | **One Tauri v2 application/installer**; React/Tailwind WebView; automation sidecars are not included |
 | Voice (Phase 2b) | English-only PTT; Groq-first STT/TTS behind adapters, with local alternatives deferred; explicit separate provider opt-ins; raw audio discarded after transcription |
 | LLM integration | Configurable Chat Completions endpoint/model/key; complete JSON action plans validated locally; provider schema enforcement optional; no LLM child process |
-| Persistence | User-managed app catalog/aliases persist in local app settings; no persistent task memory required for MVP; optional bounded diagnostic logs |
+| Persistence | Explicitly configured app entries persist locally; discovered candidates are refreshed from current system inventory; optional user aliases are explicit convenience data, not required for natural-language resolution; no persistent task memory or automatic learning in MVP |
 
 **Integration rule:** Require the documented baseline tool versions (`agent-desktop` 1.1.0; `agent-browser` 0.41.2 when browser capability is enabled) and JSON contract compatibility. Preflight tool availability/version; unknown fields may be tolerated, but incompatible envelope changes must fail visibly rather than silently misparse.
 
@@ -270,38 +271,37 @@ max_tokens / temperature / timeout: configurable within validated limits
 - Keep secrets in OS-protected storage or an appropriately secured backend credential store. Do not print authorization headers, secrets or private prompts to default logs.
 - For the MVP, DeskAct uses **one active primary endpoint/model** at a time, configurable by the user. No secondary routing model or local model-server management is included.
 
-## 7. Deterministic Intent Routing and Primary LLM Fallback
+## 7. Grounded App Selection and Primary LLM Routing
 
-There is **no Laya, System 1 model, dedicated classifier or second routing LLM in the MVP**. Deterministic matching runs first. Unmatched requests are sent directly to the **same primary LLM** used for planning and task-level reasoning. Risk decisions always belong to Rust policy, not the LLM's model confidence.
+There is **no Laya, System 1 model, dedicated classifier or second routing LLM in the MVP**. Exact canonical app-name matches and registered workflows may use a deterministic fast path. Non-exact app requests go to the **same primary LLM** used for planning and task-level reasoning, with eligible catalog candidates so the model can interpret the user's wording without inventing a target. Risk decisions and candidate-ID validation always belong to Rust, not the LLM's confidence.
 
 ```mermaid
 flowchart TD
-    A["Normalized User Request"] --> B{"Exact alias / registered command?"}
+    A["Normalized User Request"] --> B{"Exact canonical app name or registered workflow?"}
     B -->|Yes| C["Build Typed Direct Action"]
-    B -->|No| D{"Registered parameterized workflow?"}
-    D -->|Yes| E["Validate Arguments + Workflow Steps"]
-    D -->|No| F["Primary LLM: Interpret Intent"]
+    B -->|No| F["Primary LLM: Interpret + Select Catalog ID or Clarify"]
     F --> G{"Requires tools?"}
     G -->|No| ANS["Produce Answer / Clarification"]
     G -->|Yes| PLAN["Create Small Structured Task Plan"]
     C --> POLICY["Rust Risk Policy + Approval"]
-    E --> POLICY
     PLAN --> POLICY
     POLICY -->|Approved / permitted| EX["Shared Agent Execution Loop"]
     POLICY -->|Denied| STOP["Cancelled / Rejected"]
 ```
 
-**ROUTE-01 — Registry-based routing:** Match exact aliases, deterministic patterns and explicitly registered workflows. Keep typed and validated parameters. Examples: `open_app(name)`, `open_folder(alias)` and preapproved Notepad workflow steps.
+**ROUTE-01 — Deterministic fast paths:** Match exact canonical app names and explicitly registered workflows locally when unique. Optional explicit aliases may provide additional exact matches, but natural-language app resolution must not require users to teach aliases.
 
-**ROUTE-02 — Unhandled behavior:** If no supported match exists, call the primary LLM. It may return a structured task plan, request clarification, or produce a conversational response with no tools. The absence of a match never grants permission to run raw shell commands.
+**ROUTE-02 — Catalog-grounded app selection:** For non-exact app wording, provide eligible discovered/configured entries to the primary LLM and require a supplied stable catalog ID or a clarification request. Rust validates every selected ID and its configured target. Never accept model-invented executable paths, raw shell commands, or out-of-catalog identities. When multiple entries plausibly match, present candidates and ask; never choose arbitrarily.
 
-**ROUTE-03 — Dynamic OpenAI-compatible adapter:** Phase 1 uses one provider interface with **user-configurable API base URL, model ID, optional API key, and timeout/parameter settings**. Power-user setup of this endpoint and credentials is acceptable for the first usable release. The configured endpoint must implement the Chat Completions request/response shape; Responses-only endpoints are outside MVP scope. The same adapter connects to remote providers or independently started local model servers. The UI must never receive stored credentials. Every action plan must be complete JSON that passes local schema and semantic validation. Use provider-level structured-output enforcement when available; otherwise use JSON mode or prompt-constrained JSON with the same validation. API tool/function calling, streaming, and model discovery are optional; a configured model ID is sufficient. Offer a user-initiated synthetic connection test that executes no actions and is not a capability guarantee. Permit at most one bounded correction request for a malformed or schema-invalid plan; validate any corrected response from scratch, then fail closed with a specific error if it remains invalid. Never execute natural-language text or partial streamed output as a plan.
+**ROUTE-03 — Unhandled behavior:** If no supported match exists, call the primary LLM. It may return a structured task plan, request clarification, or produce a conversational response with no tools. The absence of a match never grants permission to run raw shell commands.
 
-**ROUTE-04 — Workflow independence:** A validated registered workflow may have multiple steps and still bypass LLM planning. However, each step remains subject to policy, observation and verification.
+**ROUTE-04 — Dynamic OpenAI-compatible adapter:** Phase 1 uses one provider interface with **user-configurable API base URL, model ID, optional API key, and timeout/parameter settings**. Power-user setup of this endpoint and credentials is acceptable for the first usable release. The configured endpoint must implement the Chat Completions request/response shape; Responses-only endpoints are outside MVP scope. The same adapter connects to remote providers or independently started local model servers. The UI must never receive stored credentials. Every action plan must be complete JSON that passes local schema and semantic validation. Use provider-level structured-output enforcement when available; otherwise use JSON mode or prompt-constrained JSON with the same validation. API tool/function calling, streaming, and model discovery are optional; a configured model ID is sufficient. Offer a user-initiated synthetic connection test that executes no actions and is not a capability guarantee. Permit at most one bounded correction request for a malformed or schema-invalid plan; validate any corrected response from scratch, then fail closed with a specific error if it remains invalid. Never execute natural-language text or partial streamed output as a plan.
 
-**ROUTE-05 — Replanning:** The agent loop can ask the **same primary LLM** for the next action only when unforeseen UI observations or task changes require reasoning. Normal verified step transitions require no additional LLM call.
+**ROUTE-05 — Workflow independence:** A validated registered workflow may have multiple steps and still bypass LLM planning. However, each step remains subject to policy, observation and verification.
 
-**Routing contract:** Router outputs a typed result (`Matched(DirectAction | RegisteredWorkflow)` or `Unhandled`). LLM plans return typed actions with expected postconditions; all tools are dispatched through Rust policy/execution layers. A plan cannot override policy rules.
+**ROUTE-06 — Replanning:** The agent loop can ask the **same primary LLM** for the next action only when unforeseen UI observations or task changes require reasoning. Normal verified step transitions require no additional LLM call.
+
+**Routing contract:** Deterministic routing outputs an exact match or delegates to the primary LLM. For app selection, the LLM returns a supplied catalog ID or a clarification request; Rust validates that result and the configured target before any action. LLM plans return typed actions with expected postconditions; all tools are dispatched through Rust policy/execution layers. A plan cannot override policy rules.
 
 **Example action schema (conceptual):** `action_kind`, `target`, `arguments`, `expected_postcondition`, `risk_level`, `timeout_ms`, `idempotency_class`.
 
@@ -351,7 +351,7 @@ This context is ephemeral in Phase 1; long histories and full accessibility tree
 
 ## 9. Desktop Accessibility Adapter Requirements
 
-**DSK-01 — App discovery and launch:** Discover applications from Windows Start Menu shortcuts and registered app entries, then resolve names/aliases deterministically. A clear, unique match to a discovered or user-configured app launches directly without an extra approval prompt. If the match is ambiguous or materially uncertain, present candidates and ask the user. Poll process/window availability with timeout and backoff; do not assume process creation equals GUI readiness. Never pass an LLM-generated command string to a shell.
+**DSK-01 — App discovery and launch:** Discover applications from Windows Start Menu shortcuts and registered app entries; allow explicitly configured local entries for apps discovery misses. Resolve a unique exact canonical app name deterministically. For non-exact natural-language app requests, let the primary LLM select only from eligible catalog IDs or request clarification. Rust validates the selected ID and uses only its configured target; never accept model-generated executable paths, launch arguments, or shell commands. If multiple candidates remain plausible or intent is uncertain, present candidates and ask rather than guessing. Poll process/window availability with timeout and backoff; do not assume process creation equals GUI readiness.
 
 **DSK-02 — Window identity:** Record the exact application/window identity. If several windows match, choose by stable evidence or request disambiguation; never act on a randomly selected window.
 
@@ -367,7 +367,7 @@ This context is ephemeral in Phase 1; long histories and full accessibility tree
 
 **DSK-08 — Post-action verification:** Interpret `delivered_verified` only as proof of the adapter’s *named* postcondition; verify the application-level goal separately where feasible.
 
-**DSK-09 — User-managed app entries:** Provide a simple in-app settings UI to add/edit an app display name, executable/app target, and user-defined aliases. Persist these settings locally; do not infer or learn aliases automatically. Reject conflicting aliases or present all matching candidates and ask the user which app they meant; never select randomly. A custom executable must be explicitly configured and launched directly with validated arguments, not through a shell.
+**DSK-09 — User-managed app entries:** Provide a simple in-app settings UI to add/edit an app display name and explicitly configured executable/app target, and persist these settings locally. User-defined aliases are optional convenience entries, not a prerequisite for natural-language app resolution; do not infer or learn aliases automatically. Reject conflicting optional aliases or present all matching candidates. A custom executable must be explicitly configured and launched directly with validated arguments, not through a shell. Model selection remains constrained to catalog entries.
 
 **DSK-10 — Accessibility-gated control:** After launching any discovered or configured app, attempt UI control only when the target and usable accessibility controls are observed. If controls are inaccessible or materially ambiguous, explain the limitation or ask for clarification; do not fall back to blind coordinate clicks or arbitrary commands.
 
@@ -477,7 +477,7 @@ Every task outcome should include the requested objective, achieved postconditio
 | ID | Requirement | Priority | Phase |
 |---|---|---|---|
 | CORE-01 | Run modular Rust/Tokio orchestrator in-process; validate with development-only terminal harness in Phase 1 | P0 | 1 |
-| CORE-02 | Rust registry/aliases with primary-LLM fallback; no System 1 model | P0 | 1 |
+| CORE-02 | Deterministic exact-name/workflow fast paths plus primary-LLM app selection constrained to the local catalog; no System 1 model | P0 | 1 |
 | CORE-03 | Dynamic OpenAI-compatible endpoint/model/secret configuration for one primary LLM; no second classifier | P0 | 1 |
 | CORE-04 | Task steps with explicit postconditions and verification | P0 | 1 |
 | CORE-05 | In-memory bounded task state and cancellation | P0 | 1 |
@@ -485,7 +485,7 @@ Every task outcome should include the requested objective, achieved postconditio
 | CORE-07 | Serialize mutating tasks; pause, re-observe and revalidate after possible user/UI interference | P0 | 1 |
 | VER-01 | DeskAct-owned evidence rules determine completion independently of LLM claims | P0 | 1 |
 | DSK-01–08 | Native app discovery/launch, lifecycle, snapshots, scoped refs, parsed errors and verification | P0 | 1 |
-| DSK-09–10 | User-managed local app entries/aliases in settings and accessibility-gated control | P0 | 1–2a |
+| DSK-09–10 | Explicit local app entries, optional aliases, catalog-grounded AI selection, and accessibility-gated control | P0 | 1–2a |
 | REC-01 | Disposition-aware recovery with bounded safe retries | P0 | 1 |
 | OS-01 | Allowlisted direct system commands with readiness checks | P0 | 1 |
 | PROC-01 | On-demand tool subprocess supervision, session-aware reuse, timeouts and owned-child cleanup | P0 | 1 |
@@ -547,7 +547,7 @@ flowchart LR
 ### Phase 1 — Rust orchestrator + native workflows (**current priority**)
 
 - Set up a **single Rust application crate** under `src-tauri` with modular `core/`, `tools/`, `llm/` and `commands/`; use a dev-only `examples/` or test harness while the HUD is not yet built.
-- Implement Windows app discovery for Start Menu shortcuts/registered app entries, a deterministic app catalog, a user-configurable local app-entry store exposed to the dev harness, and registered workflow matching; retain direct **single primary LLM fallback** with no System 1/Laya integration.
+- Implement Windows app discovery for Start Menu shortcuts/registered app entries, a deterministic app catalog, explicit custom app entries exposed to the dev harness, and registered workflow matching. Use unique exact canonical names as a fast path; for non-exact app phrasing, let the **single primary LLM** select a catalog ID or request clarification. Do not require or automatically learn aliases; no System 1/Laya integration.
 - Implement one primary LLM connector requiring Chat Completions compatibility, with configurable base URL/model/key, async requests, explicit synthetic connection test, locally validated JSON plans, one bounded correction request, and independent Rust risk policy. Treat provider JSON Schema, tool calling, streaming, and model discovery as optional.
 - Implement typed tool adapters, on-demand subprocess manager, process timeout/cancellation handling and logical session reuse where supported.
 - Treat `launch` as an activation attempt, not authoritative app identity. After launch, enumerate windows and proceed only when exactly one accessible window matches the selected app; fail closed for missing or ambiguous targets. If the target is minimized, ask the user to restore it manually, then re-enumerate and take a fresh snapshot; do not invoke automated restore in this scope.
@@ -559,10 +559,10 @@ flowchart LR
 ### Phase 2a — Text-first Tauri HUD
 
 - Build overlay, shortcut handling, focus restoration, task progress and cancel control.
-- Add a simple settings UI for user-managed app names, executable/app targets, and unique aliases backed by the Phase 1 local app catalog.
+- Add a simple settings UI for user-managed app names and executable/app targets backed by the Phase 1 local app catalog. Optional explicit aliases may be added for convenience, but natural-language app selection uses the primary model and does not depend on aliases.
 - Expose the already-tested core through narrow typed Tauri IPC commands and asynchronous events; keep automation CLIs outside the installer and provide setup guidance when a required CLI is missing or incompatible.
 
-**Exit:** Invoke by shortcut, execute a harness-proven workflow and observe status without taking focus permanently. Confirm custom app settings persist and resolve aliases safely. Confirm the installer ships only DeskAct and preflight detects the user-installed native CLI, validates its version, and gives actionable setup guidance when unavailable.
+**Exit:** Invoke by shortcut, execute a harness-proven workflow and observe status without taking focus permanently. Confirm custom app settings persist, natural-language requests resolve against catalog candidates, and optional aliases remain conflict-safe. Confirm the installer ships only DeskAct and preflight detects the user-installed native CLI, validates its version, and gives actionable setup guidance when unavailable.
 
 ### Phase 2b — Hands-free push-to-talk and speech
 
@@ -590,7 +590,7 @@ flowchart LR
 
 | Test | Input / injected condition | Required result |
 |---|---|---|
-| AT-01 | “Open Calculator and calculate 7 × 6” | Known alias bypasses LLM; one eligible target window is identified; a fresh accessibility snapshot shows result 42 |
+| AT-01 | “Open Calculator and calculate 7 × 6” | Exact canonical name or registered workflow may use deterministic fast path; non-exact phrasing selects only from catalog candidates; one eligible target window is identified; a fresh accessibility snapshot shows result 42 |
 | AT-02 | Launch Notepad while closed | Treat launch as activation only; use fresh window inventory and act only if exactly one eligible Notepad window matches; do not trust the launch PID alone |
 | AT-03 | Notepad minimized | Ask the user to restore it manually; re-enumerate and resnapshot, then act only on one eligible match; otherwise stop safely |
 | AT-04 | Enter a fixed marker in a fresh temporary Notepad document | A fresh snapshot/get shows the exact marker in the editor; no existing user document is used |
@@ -618,8 +618,8 @@ flowchart LR
 | AT-26 | LLM claims a goal is complete without verifier evidence | Do not report completed; return partial/unverified or failed with reason |
 | AT-27 | Phase 3: attach to dedicated Edge profile, pin intended tab, navigate to `https://example.com`, verify title/URL, enter title in Notepad | Repeatably verify both browser and Notepad outcomes; confirm loopback-only listener and no unrelated tab/profile touched; best-effort only |
 | AT-28 | Navigate File Explorer to a unique fixture folder and open its known test file | Verify the folder path and file name from fresh UI evidence; ambiguous targets trigger clarification rather than arbitrary selection |
-| AT-29 | Open a uniquely discoverable Windows app by name | Launch is treated as activation only; verify exactly one eligible target window from fresh inventory before acting; fail closed if missing or ambiguous |
-| AT-30 | App name maps to multiple discovered entries | Show candidates and ask; no random selection; a unique user alias resolves future requests |
+| AT-29 | Open a uniquely discoverable Windows app by exact or natural-language name | Exact canonical names may resolve locally; non-exact requests select only from catalog candidates; launch is activation only and requires one eligible fresh window before action |
+| AT-30 | Natural-language app request has multiple plausible catalog candidates | Primary model requests clarification or returns candidates; show choices and ask; no random selection; optional explicit alias may help exact matching but is not required |
 | AT-31 | Launched app exposes no usable accessibility controls | Report limitation; do not use blind coordinate clicks or arbitrary commands |
 | AT-32 | `agent-desktop` missing or incompatible | Do not execute native tasks; show the exact install/upgrade instructions and required version |
 | AT-33 | `agent-browser` missing/incompatible during a native task | Native task proceeds normally; browser capability stays unavailable and no automatic install is attempted |
@@ -639,8 +639,8 @@ flowchart LR
 
 | Test | Input / injected condition | Required result |
 |---|---|---|
-| APPA-01 | Add/edit a custom app entry and alias in settings | Entry persists locally and launches directly via validated executable invocation; no shell interpolation |
-| APPA-02 | Add an alias that conflicts with an existing entry | Conflict is rejected or candidates are shown; no arbitrary alias winner is selected |
+| APPA-01 | Add/edit a custom app entry in settings | Entry persists locally, joins the eligible catalog, and launches only through its validated target; no shell interpolation |
+| APPA-02 | Add an optional alias that conflicts with an existing entry | Conflict is rejected or candidates are shown; no arbitrary alias winner is selected; natural-language resolution does not depend on the alias |
 
 ### Phase 2b Voice Acceptance Tests
 
@@ -828,6 +828,12 @@ These investigations do not require introducing a new AI router or additional pr
 - **Unchanged:** Rust-first architecture, verification-oriented agent loop, safe retries, limited ephemeral memory, Tauri text/PTT Phase 2, CDP Phase 3.
 
 **Deferred investigation only:** A learned router could be evaluated after real usage data exists. It is not a scheduled deliverable and not an MVP dependency.
+
+### 21.13 v1.14 vs v1.13 — Catalog-grounded AI app selection
+
+- **Natural-language app intent:** The primary model may interpret non-exact app references by choosing from the current discovered/configured catalog or asking for clarification. Exact canonical app names and registered workflows may retain deterministic fast paths.
+- **Grounding and safety:** The model returns catalog IDs, not executable paths or shell commands. Rust validates the selected entry and still requires fresh unique-window and accessibility evidence before control.
+- **User configuration:** Explicit custom app targets remain necessary for apps automatic discovery misses. User aliases are optional convenience data, not required for natural-language use, and are never inferred or automatically learned. Persistent agent memory remains post-MVP and is not an app-identity or target source.
 
 ### 21.12 v1.13 vs v1.12 — Native Phase 0 no-go and reduced Phase 1 support
 

@@ -381,7 +381,7 @@ fn resolve_rejects_entries_with_distinct_working_directories_as_ambiguous() {
     let output = fixture.run("Calculator", "", "");
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Multiple discovered entries"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("exactly matches"));
     assert!(
         fixture
             .calls()

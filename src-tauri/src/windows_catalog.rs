@@ -42,6 +42,8 @@ pub enum DiscoverySource {
     StartMenu,
     /// Entry discovered from a registered Windows App Paths key.
     AppPaths,
+    /// Entry explicitly configured by the user in DeskAct.
+    UserConfigured,
 }
 
 impl fmt::Display for DiscoverySource {
@@ -49,6 +51,7 @@ impl fmt::Display for DiscoverySource {
         formatter.write_str(match self {
             Self::StartMenu => "start-menu",
             Self::AppPaths => "app-paths",
+            Self::UserConfigured => "user-configured",
         })
     }
 }

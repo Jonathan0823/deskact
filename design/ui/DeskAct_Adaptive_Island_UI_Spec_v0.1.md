@@ -4,7 +4,7 @@
 - **Version:** 0.1 — Initial concept
 - **Date:** 2026-11-05
 - **Status:** Proposed design; dimensions, timings, and Windows behaviors require prototype validation
-- **Related product document:** DeskAct PRD v1.13
+- **Related product document:** DeskAct PRD v1.14
 - **Target platform:** Windows, Tauri v2 + React + Tailwind CSS
 
 ---
@@ -126,7 +126,7 @@ flowchart TD
 - Tap shortcut to open the text composer; hold shortcut past a **configurable** threshold to begin recording.
 - Show a clear visual microphone-active state; never record continuously while idle.
 - Release to end capture, then transcribe via the configured STT integration.
-- On successful transcription, display the recognized text for transparency and automatically route it without requiring a separate submit action, consistent with PRD v1.13.
+- On successful transcription, display the recognized text for transparency and automatically route it without requiring a separate submit action, consistent with PRD v1.14.
 - Follow the PRD's provider-specific cloud consent, visible recording/remote-processing indicators, raw-audio discard, and PTT/cancel interruption rules.
 - Provide a fallback dedicated PTT shortcut if tap/hold differentiation is unreliable or conflicts with user shortcuts.
 - Escape cancels current input/recording rather than silently submitting.
@@ -335,7 +335,7 @@ The UI sequence follows the orchestrator build; the command composer can be prot
 7. **Approval:** An attention-required action pauses appropriately, shows consequences, and cannot continue without an explicit decision.
 8. **Failure:** Partial or failed results remain distinguishable from verified success.
 9. **Cancel:** Stop prevents subsequent planned actions, while the UI explains that already-completed side effects may remain.
-10. **PTT:** Microphone recording starts and stops only on deliberate input; successful transcripts are displayed and automatically routed without another submit step, consistent with PRD v1.13.
+10. **PTT:** Microphone recording starts and stops only on deliberate input; successful transcripts are displayed and automatically routed without another submit step, consistent with PRD v1.14.
 11. **Click behavior:** Transparent window regions do not prevent clicking the underlying desktop.
 12. **Displays:** UI remains visible, correctly anchored, and readable at multiple common Windows scaling factors and monitor layouts.
 13. **Fullscreen:** Suppression preference avoids unwanted overlays over fullscreen software.
