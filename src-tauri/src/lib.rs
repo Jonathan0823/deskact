@@ -6,7 +6,7 @@ use std::{
     fmt, fs,
     io::{self, Read},
     path::{Path, PathBuf},
-    process::{Child, Command, Output, Stdio},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -94,6 +94,9 @@ pub struct NativeWindow {
     pub accessible: bool,
     /// Whether the window is currently minimized.
     pub minimized: bool,
+    /// Whether the window currently has OS focus, when reported by the CLI.
+    #[serde(default)]
+    pub is_focused: bool,
     /// Whether the window is visible, when reported by the CLI.
     #[serde(default)]
     pub visible: bool,
@@ -217,9 +220,12 @@ impl VerifiedNativeCli {
         })
     }
 
-    /// List every fresh top-level window for cross-application outcome verification.
-    fn all_windows(&self) -> Result<Vec<NativeWindow>, DeskActError> {
-        let output = self.invoke("list-windows")?;
+    /// List every top-level window while respecting a caller's remaining deadline.
+    fn all_windows_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Vec<NativeWindow>, DeskActError> {
+        let output = self.invoke_args_with_timeout(&["list-windows"], "list-windows", timeout)?;
         let envelope: Envelope<Vec<NativeWindow>> = parse_envelope(&output, "list-windows")?;
         if envelope.version != SUPPORTED_JSON_CONTRACT_VERSION {
             return Err(DeskActError(format!(
@@ -600,13 +606,24 @@ pub fn run_file_explorer_acceptance() -> Result<(), DeskActError> {
             // Explorer's shell process launch may not expose a window to agent-desktop. This fallback only opens Explorer; it never supplies a fixture path or performs navigation.
             let powershell = env::var_os("DESKACT_POWERSHELL")
                 .unwrap_or_else(|| OsString::from("powershell.exe"));
-            let launched = Command::new(powershell)
-                .args(["-NoProfile", "-Command", "Start-Process explorer.exe"])
-                .output()
-                .map_err(|error| {
-                    DeskActError(format!("Could not launch File Explorer: {error}"))
-                })?;
-            if !launched.status.success() {
+            let mut command = Command::new(powershell);
+            command.args(["-NoProfile", "-Command", "Start-Process explorer.exe"]);
+            let launched =
+                match run_command_status_with_timeout(&mut command, NATIVE_PROCESS_TIMEOUT) {
+                    Ok(status) => status,
+                    Err(CommandRunError::TimedOut) => {
+                        return Err(DeskActError(format!(
+                            "PowerShell timed out while launching File Explorer after {} seconds",
+                            NATIVE_PROCESS_TIMEOUT.as_secs()
+                        )));
+                    }
+                    Err(CommandRunError::Io(error)) => {
+                        return Err(DeskActError(format!(
+                            "Could not start PowerShell to launch File Explorer: {error}"
+                        )));
+                    }
+                };
+            if !launched.success() {
                 return Err(DeskActError(
                     "PowerShell Start-Process could not launch File Explorer".into(),
                 ));
@@ -731,26 +748,61 @@ pub fn run_file_explorer_acceptance() -> Result<(), DeskActError> {
     }
 }
 
+/// Convert a WSL filesystem path to the Windows path Explorer can navigate to.
 fn native_ui_path(path: &Path) -> Result<String, DeskActError> {
     let path = path
         .to_str()
         .ok_or_else(|| DeskActError("Fixture path is not Unicode".into()))?;
     #[cfg(target_os = "linux")]
-    if let Some(mounted) = path.strip_prefix("/mnt/") {
-        let (drive, remainder) = mounted.split_once('/').ok_or_else(|| {
-            DeskActError("Mounted Windows fixture path did not include a directory".into())
-        })?;
-        if drive.len() == 1 && drive.as_bytes()[0].is_ascii_alphabetic() {
-            return Ok(format!(
-                "{}:\\{}",
-                drive.to_ascii_uppercase(),
-                remainder.replace('/', "\\")
+    if env::var_os("WSL_DISTRO_NAME").is_some() {
+        let mut command = Command::new("wslpath");
+        command.args(["-w", path]);
+        let output = match run_command_with_timeout(&mut command, NATIVE_PROCESS_TIMEOUT) {
+            Ok(output) => output,
+            Err(CommandRunError::TimedOut) => {
+                return Err(DeskActError(
+                    "wslpath timed out while converting the Explorer fixture path".into(),
+                ));
+            }
+            Err(CommandRunError::Io(error)) => {
+                return Err(DeskActError(format!(
+                    "Could not convert the WSL fixture path with wslpath: {error}"
+                )));
+            }
+        };
+        if !output.status.success() {
+            return Err(DeskActError(format!(
+                "wslpath could not convert the Explorer fixture path: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        let converted = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if converted.is_empty() {
+            return Err(DeskActError(
+                "wslpath returned an empty Windows fixture path".into(),
             ));
         }
+        return Ok(converted);
     }
     Ok(path.to_owned())
 }
 
+/// Return the remaining readiness budget or fail once the deadline has passed.
+fn remaining_readiness_time(
+    deadline: Instant,
+    description: &str,
+) -> Result<Duration, DeskActError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err(DeskActError(format!(
+            "{description} was not confirmed before the readiness deadline"
+        )))
+    } else {
+        Ok(remaining)
+    }
+}
+
+/// Find the uniquely associated viewer and verify the fixture marker in a fresh snapshot.
 fn wait_for_opened_file(
     cli: &VerifiedNativeCli,
     filename: &str,
@@ -758,39 +810,65 @@ fn wait_for_opened_file(
 ) -> Result<NativeWindow, DeskActError> {
     let deadline = Instant::now() + APP_READINESS_TIMEOUT;
     loop {
-        let matching: Vec<_> = cli
-            .all_windows()?
-            .into_iter()
+        let remaining = remaining_readiness_time(deadline, "The opened fixture file")?;
+        let windows = cli.all_windows_with_timeout(remaining)?;
+        if Instant::now() >= deadline {
+            return Err(DeskActError(format!(
+                "The opened fixture file `{filename}` was not confirmed before the readiness deadline"
+            )));
+        }
+        let title_matches: Vec<_> = windows
+            .iter()
             .filter(|window| {
                 !executable_stem(&window.app_name).eq_ignore_ascii_case("explorer")
                     && window.title.contains(filename)
             })
+            .cloned()
             .collect();
-        if matching.len() > 1 {
+        if title_matches.len() > 1 {
             return Err(DeskActError(format!(
                 "More than one non-Explorer window matched the unique fixture filename `{filename}`; opened-file evidence is ambiguous."
             )));
         }
-        if let Some(window) = matching.into_iter().next() {
+        let candidates = if title_matches.is_empty() {
+            windows
+                .into_iter()
+                .filter(|window| {
+                    !executable_stem(&window.app_name).eq_ignore_ascii_case("explorer")
+                        && window.is_focused
+                })
+                .collect()
+        } else {
+            title_matches
+        };
+        if candidates.len() > 1 {
+            return Err(DeskActError(format!(
+                "More than one non-Explorer window could be the focused viewer for `{filename}`; opened-file evidence is ambiguous."
+            )));
+        }
+        if let Some(window) = candidates.into_iter().next() {
             if !window.accessible || window.minimized || !window.visible || window.pid == 0 {
                 return Err(DeskActError(
                     "The fixture's opened-app window was not visible, accessible, and verifiably identified".into(),
                 ));
             }
-            let snapshot = fresh_snapshot(cli, &window)?;
+            let remaining = remaining_readiness_time(deadline, "The opened fixture file")?;
+            let snapshot = fresh_snapshot_with_timeout(cli, &window, remaining)?;
+            if Instant::now() >= deadline {
+                return Err(DeskActError(format!(
+                    "The opened fixture file `{filename}` was not confirmed before the readiness deadline"
+                )));
+            }
             if tree_contains_value(&snapshot["tree"], marker) {
                 return Ok(window);
             }
         }
-        if Instant::now() >= deadline {
-            return Err(DeskActError(format!(
-                "No fresh accessible window containing the fixture filename `{filename}` and exact marker contents appeared before the readiness deadline."
-            )));
-        }
-        thread::sleep(Duration::from_millis(100));
+        let remaining = remaining_readiness_time(deadline, "The opened fixture file")?;
+        thread::sleep(Duration::from_millis(100).min(remaining));
     }
 }
 
+/// Wait for one accessible Explorer option with the exact fixture filename.
 fn wait_for_fixture_in_explorer(
     cli: &VerifiedNativeCli,
     window: &NativeWindow,
@@ -798,7 +876,13 @@ fn wait_for_fixture_in_explorer(
 ) -> Result<serde_json::Value, DeskActError> {
     let deadline = Instant::now() + APP_READINESS_TIMEOUT;
     loop {
-        let snapshot = fresh_snapshot(cli, window)?;
+        let remaining = remaining_readiness_time(deadline, "The fixture folder contents")?;
+        let snapshot = fresh_snapshot_with_timeout(cli, window, remaining)?;
+        if Instant::now() >= deadline {
+            return Err(DeskActError(format!(
+                "The fixture file `{filename}` did not appear in a fresh Explorer snapshot before the readiness deadline."
+            )));
+        }
         let count = count_controls(&snapshot, "option", Some(filename));
         match count {
             1 => return Ok(snapshot),
@@ -807,16 +891,15 @@ fn wait_for_fixture_in_explorer(
                     "Found {count} accessible items named `{filename}` in the fixture folder; no file was opened."
                 )));
             }
-            _ if Instant::now() >= deadline => {
-                return Err(DeskActError(format!(
-                    "The fixture file `{filename}` did not appear in a fresh Explorer snapshot before the readiness deadline."
-                )));
+            _ => {
+                let remaining = remaining_readiness_time(deadline, "The fixture folder contents")?;
+                thread::sleep(Duration::from_millis(100).min(remaining));
             }
-            _ => thread::sleep(Duration::from_millis(100)),
         }
     }
 }
 
+/// Count actionable tree nodes that exactly match a role and optional accessible name.
 fn count_controls(snapshot: &serde_json::Value, role: &str, name: Option<&str>) -> usize {
     fn visit(node: &serde_json::Value, role: &str, name: Option<&str>) -> usize {
         let matching = usize::from(
@@ -842,6 +925,7 @@ fn count_controls(snapshot: &serde_json::Value, role: &str, name: Option<&str>) 
         .map_or(0, |tree| visit(tree, role, name))
 }
 
+/// Find the single fresh control with the requested role, name, and focused state.
 fn unique_focused_control<'a>(
     snapshot: &'a serde_json::Value,
     role: &str,
@@ -886,6 +970,7 @@ fn unique_focused_control<'a>(
     }
 }
 
+/// Check whether an accessibility subtree exposes the exact expected value.
 fn tree_contains_value(node: &serde_json::Value, expected: &str) -> bool {
     node.get("value").and_then(serde_json::Value::as_str) == Some(expected)
         || node
@@ -1376,6 +1461,7 @@ fn press_shortcut(
     Ok(())
 }
 
+/// Focus one verified window before sending a keyboard shortcut to that app.
 fn press_app_shortcut(
     cli: &VerifiedNativeCli,
     window: &NativeWindow,
@@ -1543,11 +1629,21 @@ fn wait_for_save_dialog(
     }
 }
 
+/// Capture and validate a fresh interactive snapshot for one selected window.
 fn fresh_snapshot(
     cli: &VerifiedNativeCli,
     window: &NativeWindow,
 ) -> Result<serde_json::Value, DeskActError> {
-    let output = cli.invoke_args(
+    fresh_snapshot_with_timeout(cli, window, NATIVE_PROCESS_TIMEOUT)
+}
+
+/// Capture a fresh interactive snapshot without exceeding the supplied time budget.
+fn fresh_snapshot_with_timeout(
+    cli: &VerifiedNativeCli,
+    window: &NativeWindow,
+    timeout: Duration,
+) -> Result<serde_json::Value, DeskActError> {
+    let output = cli.invoke_args_with_timeout(
         &[
             "snapshot",
             "--app",
@@ -1557,6 +1653,7 @@ fn fresh_snapshot(
             "-i",
         ],
         "snapshot",
+        timeout,
     )?;
     let data = successful_data(output, "snapshot")?;
     if data
@@ -1588,6 +1685,7 @@ fn fresh_snapshot(
     Ok(data)
 }
 
+/// Find the single fresh actionable control matching the requested role and name.
 fn unique_control<'a>(
     snapshot: &'a serde_json::Value,
     role: &str,
@@ -1793,6 +1891,35 @@ fn run_agent_desktop(executable: &OsStr, command: &str) -> Result<Output, DeskAc
     }
 }
 
+/// Wait for a subprocess without inheritable output pipes and enforce a hard deadline.
+fn run_command_status_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<ExitStatus, CommandRunError> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(CommandRunError::Io)?;
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = terminate_and_reap(&mut child);
+                return Err(CommandRunError::TimedOut);
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                let _ = terminate_and_reap(&mut child);
+                return Err(CommandRunError::Io(error));
+            }
+        }
+    }
+}
+
 /// Run a subprocess while draining both output streams and enforcing a hard deadline.
 pub(crate) fn run_command_with_timeout(
     command: &mut Command,
@@ -1858,6 +1985,7 @@ fn finish_pipe(reader: JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8>, Comma
 mod tests {
     use super::*;
 
+    /// Ensure the generic pipe-draining subprocess runner kills a process at its deadline.
     #[test]
     fn subprocess_deadline_terminates_and_reaps_child() {
         let mut command = Command::new("sh");
@@ -1870,6 +1998,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 
+    /// Preserve the Notepad acceptance gate's rounded-up 95% success threshold.
     #[test]
     fn notepad_acceptance_uses_a_ninety_five_percent_success_gate() {
         assert_eq!(required_successes(20), 19);
@@ -1879,6 +2008,38 @@ mod tests {
             required_successes(usize::MAX),
             (usize::MAX / 100) * 95 + (usize::MAX % 100 * 95).div_ceil(100)
         );
+    }
+
+    /// Verify launch waits avoid inherited output pipes and terminate a hung direct child.
+    #[test]
+    fn status_wait_is_bounded_and_does_not_wait_for_inherited_output_handles() {
+        let unique = format!("deskact-child-{}", std::process::id());
+        let pid_file = env::temp_dir().join(unique);
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "sleep 30 & echo $! > \"$DESKACT_TEST_CHILD_PID_FILE\"; exit 0",
+            ])
+            .env("DESKACT_TEST_CHILD_PID_FILE", &pid_file);
+        let started = Instant::now();
+        let status = run_command_status_with_timeout(&mut command, Duration::from_secs(2))
+            .expect("launcher parent should exit successfully");
+        assert!(status.success());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        if let Ok(pid) = fs::read_to_string(&pid_file) {
+            let _ = Command::new("kill").arg(pid.trim()).status();
+            let _ = fs::remove_file(pid_file);
+        }
+
+        let mut hung = Command::new("sh");
+        hung.args(["-c", "exec sleep 10"]);
+        let started = Instant::now();
+        assert!(matches!(
+            run_command_status_with_timeout(&mut hung, Duration::from_millis(50)),
+            Err(CommandRunError::TimedOut)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }
 
