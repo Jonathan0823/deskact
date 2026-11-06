@@ -9,6 +9,7 @@ use std::{
 use deskact_core::{
     NativeTargetResolution, VerifiedNativeCli, native_inventory, preflight, resolve_native_target,
     run_calculator_acceptance, run_file_explorer_acceptance, run_notepad_acceptance,
+    run_vlc_acceptance,
 };
 
 /// Run the developer-only native preflight, inventory, target-resolution, or acceptance command.
@@ -38,6 +39,13 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("vlc-acceptance") => match run_vlc_acceptance() {
+            Ok(()) => {
+                println!("VLC acceptance verified advancing playback of the generated fixture.");
+                ExitCode::SUCCESS
+            }
+            Err(error) => fail(error.to_string()),
+        },
         Some("calculator-acceptance") => match run_calculator_acceptance() {
             Ok(()) => {
                 println!(
@@ -125,7 +133,7 @@ fn main() -> ExitCode {
 
         _ => {
             eprintln!(
-                "Usage: deskact-dev <preflight|inventory|resolve <discovered-app-name>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance>"
+                "Usage: deskact-dev <preflight|inventory|resolve <discovered-app-name>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
             );
             ExitCode::from(2)
         }
