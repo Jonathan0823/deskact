@@ -4,16 +4,16 @@ import { listen } from "@tauri-apps/api/event";
 import { Check, LoaderCircle, Mic, Play, TriangleAlert, X } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
-type PrototypeState = "composer" | "working" | "attention" | "settings" | "voice" | "transcribing";
-type PreviewState = "hidden" | "command" | "voice" | "transcribing" | "working" | "details" | "approval" | "done" | "error" | "cancelled";
+type PrototypeState = "composer" | "working" | "attention" | "settings" | "voice";
+type PreviewState = "hidden" | "command" | "voice" | "working" | "details" | "approval" | "destructive" | "removed" | "destroyed" | "done" | "error" | "cancelled";
 const previewStates: Array<{ id: PreviewState; label: string }> = [
   { id: "hidden", label: "Hidden" },
   { id: "command", label: "Command" },
   { id: "voice", label: "Voice" },
-  { id: "transcribing", label: "STT" },
   { id: "working", label: "Working" },
   { id: "details", label: "Details" },
-  { id: "approval", label: "Approval" },
+  { id: "approval", label: "Remove" },
+  { id: "destructive", label: "Destruction" },
   { id: "done", label: "Done" },
   { id: "error", label: "Error" },
   { id: "cancelled", label: "Stopped" },
@@ -67,9 +67,9 @@ function previewView(state: PreviewState): PrototypeState | "hidden" {
   switch (state) {
     case "hidden": return "hidden";
     case "command": return "composer";
-    case "approval": return "attention";
+    case "approval":
+    case "destructive": return "attention";
     case "voice": return "voice";
-    case "transcribing": return "transcribing";
     default: return "working";
   }
 }
@@ -86,10 +86,10 @@ function phaseLabel(phase: TaskPhase) {
 }
 
 const demoSteps = ["Opening Spotify", "Finding Liked Songs", "Starting playback"];
-const demoTranscript = "Open Spotify and play my Liked Songs";
+const demoVoiceCommand = "Open Spotify and play my Liked Songs";
 function previewTask(state: PreviewState, step: number): TaskSnapshot | null {
   const phase: TaskPhase | null = state === "working" || state === "details" ? "running"
-    : state === "done" ? "completed"
+    : state === "done" || state === "removed" || state === "destroyed" ? "completed"
       : state === "error" ? "failed"
         : state === "cancelled" ? "cancelled"
           : null;
@@ -97,7 +97,9 @@ function previewTask(state: PreviewState, step: number): TaskSnapshot | null {
 
   const currentStep = state === "done" ? demoSteps.length - 1 : Math.max(0, Math.min(step, demoSteps.length - 1));
   const message = state === "done" ? "Playback verified"
-    : state === "error" ? "Couldn't identify the right window"
+    : state === "removed" ? "Moved to Recycle Bin"
+      : state === "destroyed" ? "Permanently deleted"
+        : state === "error" ? "Couldn't identify the right window"
       : state === "cancelled" ? "Task stopped"
         : demoSteps[currentStep];
   return {
@@ -109,7 +111,7 @@ function previewTask(state: PreviewState, step: number): TaskSnapshot | null {
     report: null,
     test_fixture: true,
     cancellation_requested: false,
-    progress: { app_name: "Spotify", current_step: currentStep + 1, total_steps: demoSteps.length },
+    progress: state === "removed" || state === "destroyed" ? null : { app_name: "Spotify", current_step: currentStep + 1, total_steps: demoSteps.length },
   };
 }
 
@@ -147,10 +149,11 @@ export default function App() {
   const contentDetailsExpanded = browserPreview && previewState === "hidden"
     ? lastPreviewState.current === "details"
     : displayedDetailsExpanded;
+  const destructiveApproval = browserPreview && (previewState === "destructive" || (previewState === "hidden" && lastPreviewState.current === "destructive"));
 
   function selectPreviewState(next: PreviewState) {
     if (next === "working") setPreviewStep(0);
-    if (next === "transcribing") setStreamedTranscript("");
+    if (next === "voice") setStreamedTranscript("");
     setPreviewState(next);
   }
 
@@ -175,6 +178,7 @@ export default function App() {
     if (quitRequested || state === "attention") width = 490;
     else if (state === "composer") width = 506;
     else if (state === "settings") width = 520;
+    else if (state === "voice") width = 360;
     else if (detailsExpanded) width = 502;
     else if (task?.phase === "partial" || task?.phase === "failed") width = 366;
     else width = task?.phase === "completed" || task?.phase === "cancelled" ? 296 : 352;
@@ -204,19 +208,19 @@ export default function App() {
   }, [browserPreview, previewState]);
 
   useEffect(() => {
-    if (!browserPreview || (previewState !== "voice" && previewState !== "transcribing")) return;
-    let visibleCharacters = 0;
+    if (!browserPreview || previewState !== "voice") return;
+    const words = demoVoiceCommand.match(/\S+\s*/g) ?? [demoVoiceCommand];
+    let visibleWords = 0;
     let completionTimer: number | null = null;
     const timer = window.setInterval(() => {
-      visibleCharacters = Math.min(demoTranscript.length, visibleCharacters + 1);
-      const partialTranscript = demoTranscript.slice(0, visibleCharacters);
-      setStreamedTranscript(partialTranscript);
-      if (visibleCharacters >= demoTranscript.length) {
+      visibleWords = Math.min(words.length, visibleWords + 1);
+      setStreamedTranscript(words.slice(0, visibleWords).join(""));
+      if (visibleWords >= words.length) {
         window.clearInterval(timer);
-        setRequest(demoTranscript);
+        setRequest(demoVoiceCommand);
         completionTimer = window.setTimeout(() => setPreviewState("command"), 800);
       }
-    }, 28);
+    }, 120);
     return () => {
       window.clearInterval(timer);
       if (completionTimer !== null) window.clearTimeout(completionTimer);
@@ -408,8 +412,7 @@ export default function App() {
               </div>
               <div className="composer-hints">
                 <div className="composer-voice-entry">
-                  {browserPreview && <button className="voice-button" type="button" aria-label="Open voice preview" onClick={() => selectPreviewState("voice")}><Mic size={15} aria-hidden="true" /></button>}
-                  {browserPreview && <span>Voice preview</span>}
+                  {browserPreview && <button className="voice-button" type="button" aria-label="Voice input" onClick={() => selectPreviewState("voice")}><Mic size={15} aria-hidden="true" /></button>}
                 </div>
                 <div className="composer-key-hints"><span>Enter to run</span><span>Esc to dismiss</span></div>
               </div>
@@ -420,28 +423,14 @@ export default function App() {
       )}
 
       {contentState === "voice" && (
-        <section className="shell compact-shell voice-shell" aria-label="Voice mode preview">
+        <section className="shell compact-shell voice-shell" aria-label="Voice input">
           <div className="compact-icon mic-active"><Mic size={17} aria-hidden="true" /></div>
           <div className="voice-copy">
-            <div className="status-title">Listening…</div>
             <div className="voice-live-row">
               <div className="wave" aria-hidden="true">{Array.from({ length: 17 }, (_, index) => <i key={index} />)}</div>
-              <span className="status-sub">Streaming transcript</span>
             </div>
-            <div className="transcript-line" aria-hidden="true">{streamedTranscript}<span className="transcript-caret" /></div>
-            <span className="sr-only" role="status">Voice UI preview. Streaming transcription appears live. No microphone is active.</span>
-          </div>
-          <button className="text-control" type="button" onClick={() => selectPreviewState("command")}>Cancel</button>
-        </section>
-      )}
-
-      {contentState === "transcribing" && (
-        <section className="shell compact-shell transcribing-shell" aria-label="Transcription preview">
-          <div className="compact-icon"><LoaderCircle className="spin" size={17} aria-hidden="true" /></div>
-          <div className="transcription-copy">
-            <div className="status-title">Transcribing…</div>
-            <div className="transcript-line" aria-hidden="true">{streamedTranscript}<span className="transcript-caret" /></div>
-            <span className="sr-only" role="status">{streamedTranscript.length >= demoTranscript.length ? "Transcript added to the command field." : "Streaming transcription preview."}</span>
+            <StreamingText text={streamedTranscript} />
+            <span className="sr-only" role="status">Listening for voice input.</span>
           </div>
           <button className="text-control" type="button" onClick={() => selectPreviewState("command")}>Cancel</button>
         </section>
@@ -452,7 +441,6 @@ export default function App() {
           <TaskStatus
             task={contentTask}
             detailsExpanded={contentDetailsExpanded}
-            demoMode={browserPreview}
             onToggleDetails={() => browserPreview ? selectPreviewState(contentDetailsExpanded ? "working" : "details") : setDetailsExpanded((value) => !value)}
             onStop={() => browserPreview ? selectPreviewState("cancelled") : void stopTask()}
           />
@@ -467,15 +455,22 @@ export default function App() {
       )}
 
       {contentState === "attention" && (
-        <section className="shell attention-shell" aria-labelledby="attention-title">
-          <p className="attention-label" id="attention-title">Approval required</p>
-          <p className="approval-text">Move 3 selected files to the Recycle Bin?</p>
-          <div className="resource">Affected location · Downloads</div>
-          <div className="button-row">
-            <button className="quiet-button" type="button" onClick={() => browserPreview ? selectPreviewState("cancelled") : setState("working")}>Reject</button>
-            <button className="primary-button" type="button" onClick={() => browserPreview ? selectPreviewState("done") : setState("working")}>Approve</button>
+        <section className={`shell attention-shell approval-shell ${destructiveApproval ? "approval-destructive" : "approval-reversible"}`} aria-labelledby="attention-title">
+          <div className="approval-header">
+            <div className={`compact-icon ${destructiveApproval ? "danger" : "warn"}`} aria-hidden="true"><TriangleAlert size={18} /></div>
+            <div>
+              <p className="attention-label" id="attention-title">{destructiveApproval ? "Permanent deletion" : "Reversible removal"}</p>
+              <p className="status-sub">{destructiveApproval ? "Cannot be undone" : "Can be restored from the Recycle Bin"}</p>
+            </div>
           </div>
-          {browserPreview && <p className="preview-only">Preview only · no files will change</p>}
+          <p className="approval-text">{destructiveApproval ? <>Permanently delete <strong>3 selected files</strong>?</> : <>Move <strong>3 selected files</strong> to the Recycle Bin?</>}</p>
+          <div className="resource"><span className="mini-label">Affected location</span><br />C:\Users\You\Downloads</div>
+          <div className="button-row">
+            <button className="quiet-button" type="button" onClick={() => browserPreview ? selectPreviewState("cancelled") : setState("working")}>Cancel</button>
+            <button className={`primary-button approval-action ${destructiveApproval ? "destructive-action" : "reversible-action"}`} type="button" onClick={() => browserPreview ? selectPreviewState(destructiveApproval ? "destroyed" : "removed") : setState("working")}>
+              {destructiveApproval ? "Delete permanently" : "Move to Recycle Bin"}
+            </button>
+          </div>
         </section>
       )}
 
@@ -520,16 +515,35 @@ export default function App() {
   );
 }
 
+function StreamingText({ text }: { text: string }) {
+  const reducedMotion = useReducedMotion();
+  const words = text.match(/\S+\s*/g) ?? [];
+  return (
+    <div className="transcript-line" aria-hidden="true">
+      {words.map((word, index) => (
+        <motion.span
+          key={index}
+          className="transcript-word"
+          initial={reducedMotion ? { opacity: 0 } : { opacity: 0, filter: "blur(5px)", y: 3 }}
+          animate={{ opacity: 1, filter: "blur(0px)", y: 0 }}
+          transition={{ duration: reducedMotion ? 0.01 : 0.2, ease: [0.22, 1, 0.36, 1] }}
+        >
+          {word}
+        </motion.span>
+      ))}
+      <span className="transcript-caret" />
+    </div>
+  );
+}
+
 export function TaskStatus({
   task,
   detailsExpanded,
-  demoMode = false,
   onToggleDetails,
   onStop,
 }: {
   task: TaskSnapshot;
   detailsExpanded: boolean;
-  demoMode?: boolean;
   onToggleDetails: () => void;
   onStop: () => void;
 }) {
@@ -540,10 +554,9 @@ export function TaskStatus({
   const title = complete ? "Task completed" : failed ? "Action needs attention" : task.phase === "cancelled" ? "Task stopped" : task.message || phaseLabel(task.phase);
   const subtitle = failed
     ? task.message || phaseLabel(task.phase)
-    : complete && demoMode ? "Playback verified · Demo"
+    : complete ? task.message || phaseLabel(task.phase)
       : task.progress ? `${task.progress.app_name} · Step ${task.progress.current_step} of ${task.progress.total_steps}`
-        : task.test_fixture ? "Fixture only · no desktop action"
-          : phaseLabel(task.phase);
+        : phaseLabel(task.phase);
   const iconClass = complete ? "compact-icon success" : failed ? "compact-icon danger" : task.phase === "cancelled" ? "compact-icon muted-icon" : "compact-icon";
 
   return (
@@ -571,10 +584,9 @@ export function TaskStatus({
         {detailsExpanded && (
           <motion.div className="task-detail-motion" initial={reducedMotion ? { opacity: 0, height: 0 } : { opacity: 0, height: 0, y: 4 }} animate={{ opacity: 1, height: "auto", y: 0 }} exit={reducedMotion ? { opacity: 0, height: 0 } : { opacity: 0, height: 0, y: 2 }} transition={{ duration: reducedMotion ? 0.01 : 0.2, ease: [0.22, 1, 0.36, 1] }}>
             <div className="task-detail-list">
-              {demoMode ? <DemoStepList task={task} />
-                : task.report
-                  ? <TaskReportDetails report={task.report} testFixture={task.test_fixture} />
-                  : <><span className="mini-label">{task.test_fixture ? "Fixture details" : "Task details"}</span><p>{task.test_fixture ? "Fixture data only; no native action was dispatched." : task.message || "DeskAct is checking the request and supported target."}</p></>}
+              {task.report
+                ? <TaskReportDetails report={task.report} />
+                : <><span className="mini-label">Task details</span><p>{task.message || "DeskAct is checking the request and supported target."}</p></>}
             </div>
           </motion.div>
         )}
@@ -613,39 +625,11 @@ function ProgressTrack({ progress, active }: { progress: TaskProgress; active: b
   );
 }
 
-function DemoStepList({ task }: { task: TaskSnapshot }) {
-  const current = Math.min((task.progress?.current_step ?? 1) - 1, demoSteps.length - 1);
-  const finished = task.phase === "completed";
-  return (
-    <>
-      <span className="mini-label">Demo steps · no real actions</span>
-      <div className="step-list">
-        {demoSteps.map((step, index) => {
-          const completed = finished || index < current;
-          const currentStep = !finished && index === current && isActiveTask(task);
-          return (
-            <div className="step" key={step}>
-              <span className={`step-icon${completed ? " ok" : currentStep ? " current" : ""}`} aria-hidden="true">
-                {completed ? <Check size={14} /> : currentStep ? <LoaderCircle className="loading-icon" size={15} /> : "○"}
-              </span>
-              <strong>{step}</strong>
-              {completed && <span className="step-status">Verified · demo</span>}
-              {currentStep && <span className="step-status current-status">Current</span>}
-            </div>
-          );
-        })}
-      </div>
-      <p>Preview only; no desktop action was dispatched or verified.</p>
-    </>
-  );
-}
-
 function PreviewControls({ selected, onSelect }: { selected: PreviewState; onSelect: (state: PreviewState) => void }) {
   return (
     <aside className="preview-controls" aria-label="Prototype controls">
       <div className="preview-controls-heading">
-        <strong>Prototype controls</strong>
-        <span>v0.1</span>
+        <strong>Window states</strong>
       </div>
       <div className="preview-state-grid">
         {previewStates.map(({ id, label }) => (
@@ -654,25 +638,18 @@ function PreviewControls({ selected, onSelect }: { selected: PreviewState; onSel
           </button>
         ))}
       </div>
-      <p className="preview-controls-note">Preview only · no mic or desktop actions are used</p>
     </aside>
   );
 }
 
-function TaskReportDetails({ report, testFixture }: { report: TaskReport; testFixture: boolean }) {
+function TaskReportDetails({ report }: { report: TaskReport }) {
   return (
     <div className="task-detail-list">
-      <strong>{testFixture ? "Fixture-only outcome" : report.status === "completed" ? "Verified results" : "Outcome details"}</strong>
-      {testFixture ? (
-        <p>Fixture data only; no native action or verification was performed.</p>
-      ) : (
-        <>
-          {report.evidence.map((item) => <p key={item.app_name}>{item.app_name}: open in a uniquely matched accessible window with a fresh snapshot.</p>)}
-          {report.achieved_postconditions.map((item) => <p key={item}>{item}</p>)}
-          {report.unresolved_steps.map((item) => <p className="warning-copy" key={item}>{item}</p>)}
-          {!report.evidence.length && !report.unresolved_steps.length && <p>{report.summary}</p>}
-        </>
-      )}
+      <strong>{report.status === "completed" ? "Verified results" : "Outcome details"}</strong>
+      {report.evidence.map((item) => <p key={item.app_name}>{item.app_name}: open in a uniquely matched accessible window with a fresh snapshot.</p>)}
+      {report.achieved_postconditions.map((item) => <p key={item}>{item}</p>)}
+      {report.unresolved_steps.map((item) => <p className="warning-copy" key={item}>{item}</p>)}
+      {!report.evidence.length && !report.unresolved_steps.length && <p>{report.summary}</p>}
     </div>
   );
 }

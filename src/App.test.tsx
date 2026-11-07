@@ -47,7 +47,8 @@ describe("Adaptive Island", () => {
     await user.click(controls.getByRole("button", { name: "Working" }));
     expect(screen.getByText("Opening Spotify")).toBeTruthy();
     await user.click(controls.getByRole("button", { name: "Details" }));
-    expect(screen.getByText("Preview only; no desktop action was dispatched or verified.")).toBeTruthy();
+    expect(screen.getByText("Task details")).toBeTruthy();
+    expect(within(screen.getByRole("main", { name: "DeskAct Adaptive Island" })).queryByText(/demo|fixture|preview only/i)).toBeNull();
     await user.click(controls.getByRole("button", { name: "Hidden" }));
     expect(screen.queryByRole("main", { name: "DeskAct Adaptive Island" })).toBeNull();
     expect(controls.getByRole("button", { name: "Hidden" })).toBeTruthy();
@@ -71,32 +72,48 @@ describe("Adaptive Island", () => {
     render(<App />);
     const controls = within(screen.getByRole("complementary", { name: "Prototype controls" }));
 
-    await user.click(controls.getByRole("button", { name: "Approval" }));
-    expect(screen.getByText("Move 3 selected files to the Recycle Bin?")).toBeTruthy();
-    expect(screen.getByText("Preview only · no files will change")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Approve" }));
-    expect(screen.getByText("Playback verified · Demo")).toBeTruthy();
-    expect(screen.getByRole("progressbar", { name: "Task progress" })).toBeTruthy();
+    await user.click(controls.getByRole("button", { name: "Remove" }));
+    expect(document.querySelector(".approval-text")?.textContent?.replace(/\s+/g, " ").trim()).toBe("Move 3 selected files to the Recycle Bin?");
+    expect(screen.getByText("Can be restored from the Recycle Bin")).toBeTruthy();
+    expect(document.querySelector(".approval-shell")?.classList.contains("approval-reversible")).toBe(true);
+    expect(within(screen.getByRole("main", { name: "DeskAct Adaptive Island" })).queryByText(/demo|fixture|preview only/i)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Move to Recycle Bin" }));
+    expect(screen.getByText("Moved to Recycle Bin")).toBeTruthy();
+    expect(screen.queryByRole("progressbar", { name: "Task progress" })).toBeNull();
     await user.click(controls.getByRole("button", { name: "Error" }));
     expect(screen.getByRole("main", { name: "DeskAct Adaptive Island" }).className).toContain("state-error");
     expect(screen.getByText("Couldn't identify the right window")).toBeTruthy();
   });
 
-  it("streams a voice preview live into the command field without a confirmation step", async () => {
+  it("shows a separately red-coded permanent-deletion approval", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const controls = within(screen.getByRole("complementary", { name: "Prototype controls" }));
+
+    await user.click(controls.getByRole("button", { name: "Destruction" }));
+    expect(document.querySelector(".approval-text")?.textContent?.replace(/\s+/g, " ").trim()).toBe("Permanently delete 3 selected files?");
+    expect(screen.getByText("Cannot be undone")).toBeTruthy();
+    expect(document.querySelector(".approval-shell")?.classList.contains("approval-destructive")).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Delete permanently" }));
+    expect(screen.getByText("Permanently deleted")).toBeTruthy();
+  });
+
+  it("auto-fills voice transcription without a confirmation step", async () => {
     const user = userEvent.setup();
     render(<App />);
     const controls = within(screen.getByRole("complementary", { name: "Prototype controls" }));
 
     await user.click(controls.getByRole("button", { name: "Voice" }));
-    expect(screen.getByText("Listening…")).toBeTruthy();
-    expect(screen.getByText("Streaming transcript")).toBeTruthy();
+    expect(screen.queryByText("Listening…")).toBeNull();
+    expect(screen.getByRole("region", { name: "Voice input" })).toBeTruthy();
+    expect(screen.queryByText("Streaming transcript")).toBeNull();
+    await waitFor(() => expect(document.querySelector(".transcript-line")?.textContent?.length).toBeGreaterThan(0));
     await waitFor(() => {
       expect((screen.getByRole("textbox", { name: "What would you like DeskAct to do?" }) as HTMLInputElement).value).toBe("Open Spotify and play my Liked Songs");
     }, { timeout: 3000 });
     expect(screen.queryByRole("button", { name: "Use text" })).toBeNull();
 
-    await user.click(controls.getByRole("button", { name: "STT" }));
-    expect(screen.getByText("Transcribing…")).toBeTruthy();
+    expect(controls.queryByRole("button", { name: "STT" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Use text" })).toBeNull();
   });
 
