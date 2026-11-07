@@ -64,6 +64,12 @@ impl LoopbackEndpoint {
 }
 
 fn read_http_request(stream: &mut TcpStream) -> String {
+    stream
+        .set_nonblocking(false)
+        .expect("set fixture connection blocking");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("bound fixture request read");
     let mut request = Vec::new();
     let mut buffer = [0; 4096];
     loop {
