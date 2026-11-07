@@ -55,17 +55,40 @@ jobs:
           npm run check
           npm test
       - uses: dtolnay/rust-toolchain@stable
+      # Keep test builds from replacing the production executable with a dev-mode build.
       - name: Build DeskAct app with Tauri CLI and bundled frontend
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target/app-release
         run: npm run tauri -- build --no-bundle --features custom-protocol --config src-tauri/tauri.release.conf.json --ci
+      - name: Record production app hash
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash src-tauri/target/app-release/release/deskact.exe -Algorithm SHA256).Hash
+          "DESKACT_APP_SHA256=$hash" >> $env:GITHUB_ENV
       - name: Build developer-only CLI harness
         run: cargo build --manifest-path src-tauri/Cargo.toml --bin deskact-dev --release --locked
       - name: Run Windows integration tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets --release --locked
+      - name: Verify exact app artifact remains production with embedded UI
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path src-tauri/target/app-release/release/deskact.exe
+          if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $env:DESKACT_APP_SHA256) {
+            throw "Production executable changed during tests"
+          }
+          $process = Start-Process -FilePath $exe -ArgumentList '--verify-bundled-ui' -PassThru
+          if (-not $process.WaitForExit(30000)) {
+            $process.Kill()
+            throw "App artifact verification timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "App artifact failed production-mode/embedded-UI verification: $($process.ExitCode)"
+          }
       - name: Upload DeskAct app
         uses: actions/upload-artifact@v7
         with:
           name: deskact-prototype-windows-x64
-          path: src-tauri/target/release/deskact.exe
+          path: src-tauri/target/app-release/release/deskact.exe
           if-no-files-found: error
           retention-days: 14
       - name: Upload developer-only CLI harness separately

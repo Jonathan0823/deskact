@@ -8,6 +8,13 @@ use tasks::TaskHub;
 use tauri::Manager;
 
 pub fn run() {
+    let context = tauri::generate_context!();
+    if std::env::args().any(|arg| arg == "--verify-bundled-ui") {
+        let valid = !tauri::is_dev()
+            && context.config().build.dev_url.is_none()
+            && context.assets().get(&"index.html".into()).is_some();
+        std::process::exit(if valid { 0 } else { 1 });
+    }
     tauri::Builder::default()
         .manage(ShortcutState::default())
         .manage(window_behavior::PreviousForegroundWindow::default())
@@ -44,7 +51,7 @@ pub fn run() {
             tray::install(app)?;
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running DeskAct");
 }
 
