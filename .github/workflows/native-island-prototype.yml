@@ -24,6 +24,6 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: deskact-native-island-probe-windows-x64
-          path: prototypes/native-island/target/x86_64-pc-windows-msvc/release/deskact_native_island_probe.exe
+          path: prototypes/native-island/target/x86_64-pc-windows-msvc/release/deskact-native-island-probe.exe
           if-no-files-found: error
           retention-days: 14
