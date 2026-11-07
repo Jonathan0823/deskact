@@ -23,7 +23,8 @@ pub use app_catalog::{
 };
 mod llm;
 pub use llm::{
-    ActionPlan, ActionPlanStep, LlmConnectionReport, test_llm_connection, validate_action_plan_json,
+    ActionPlan, ActionPlanStep, LlmConnectionReport, request_action_plan, test_llm_connection,
+    validate_action_plan_json,
 };
 mod windows_catalog;
 pub use windows_catalog::{

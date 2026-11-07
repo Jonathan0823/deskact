@@ -255,6 +255,60 @@ pub async fn test_llm_connection() -> Result<LlmConnectionReport, DeskActError> 
     })
 }
 
+/// Request a plan from the primary model and allow one bounded correction attempt.
+pub async fn request_action_plan(request: &str) -> Result<ActionPlan, DeskActError> {
+    if request.trim().is_empty()
+        || request.chars().count() > 4_000
+        || request.chars().any(char::is_control)
+    {
+        return Err(DeskActError::new(
+            "Task request must be non-empty, at most 4,000 characters, and contain no control characters".into(),
+        ));
+    }
+    let config = LlmConfig::from_env()?;
+    let system = r#"Return only one complete JSON object matching DeskAct action-plan version 1. Schema: {"version":1,"summary":string,"steps":[{"operation":lowercase_identifier,"parameters":object,"expected_outcome":string}]}. Use 1 to 20 steps; summary and expected_outcome must be non-empty and at most 500 characters. This is a proposal, not authorization. Never include shell commands or executable paths."#;
+    let first_response = config
+        .complete(vec![
+            ChatMessage {
+                role: "system",
+                content: system.into(),
+            },
+            ChatMessage {
+                role: "user",
+                content: format!("Propose a plan for this request: {request}"),
+            },
+        ])
+        .await?;
+    let first_error = match validate_action_plan_json(&first_response) {
+        Ok(plan) => return Ok(plan),
+        Err(error) => error.to_string(),
+    };
+
+    let corrected_response = config
+        .complete(vec![
+            ChatMessage {
+                role: "system",
+                content: system.into(),
+            },
+            ChatMessage {
+                role: "assistant",
+                content: first_response,
+            },
+            ChatMessage {
+                role: "user",
+                content: format!(
+                    "Your prior response failed local validation: {first_error}. Return one corrected complete JSON action plan matching the system contract."
+                ),
+            },
+        ])
+        .await?;
+    validate_action_plan_json(&corrected_response).map_err(|error| {
+        DeskActError::new(format!(
+            "Primary model returned an invalid action plan after one bounded correction attempt: {error}"
+        ))
+    })
+}
+
 /// Parse and semantically validate a complete version-1 action plan.
 pub fn validate_action_plan_json(response: &str) -> Result<ActionPlan, DeskActError> {
     if response.len() > MAX_ACTION_PLAN_BYTES {
