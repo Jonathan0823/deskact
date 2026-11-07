@@ -15,6 +15,12 @@ use std::{
 
 use serde::Deserialize;
 
+mod approval;
+pub use approval::{
+    ActionRiskClass, ActionScope, ApprovalDecision, ApprovalGrant, ApprovalRequest,
+    ApprovalSimulationReport, authorize_action, classify_action, explicitly_approve,
+    request_approval, simulate_approval_scenario,
+};
 mod app_catalog;
 pub use app_catalog::{
     AppCandidate, AppCatalogEntry, AppCatalogSource, AppSelectionInput, AppSelectionOutcome,

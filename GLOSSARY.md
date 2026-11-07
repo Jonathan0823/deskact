@@ -13,6 +13,17 @@ _Avoid_: AI-generated target
 **User-defined app alias**: An optional, explicitly saved phrase associated with a catalog entry to support exact matching. It is a convenience, not a requirement for natural-language app selection, and is not learned automatically.
 _Avoid_: learned alias
 
+## Approval and risk language
+
+**Consequential action**: An action that is destructive, externally visible, or materially changes system settings, and therefore requires explicit user approval. DeskAct classifies the action; model claims cannot lower its risk.
+_Avoid_: model-approved action
+
+**Action scope**: The exact operation, target, and parameters shown for a proposed action. Changing any part creates a different scope.
+_Avoid_: approval context (when referring to the action itself)
+
+**Action-specific approval**: The user's explicit permission for one action scope. It cannot authorize a different operation, target, or parameter set.
+_Avoid_: blanket approval
+
 ## LLM planning and API language
 
 **Primary model**: The single user-configured LLM endpoint and model used to interpret unmatched requests and propose action plans.
