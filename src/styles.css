@@ -154,6 +154,34 @@ button { color: inherit; }
 .shortcut-status.warning, .error-message { color: #e2b9a3; }
 .settings-surface .button-row { margin-top: 3px; }
 .primary-button { padding: 8px 11px; font-size: 11px; }
+.stop-button { flex: 0 0 auto; }
+.danger-button {
+  border: 1px solid rgba(255, 132, 132, 0.25);
+  border-radius: 999px;
+  padding: 0 14px;
+  color: #ffc6c6;
+  background: rgba(106, 33, 42, 0.55);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.danger-button:disabled { cursor: default; opacity: 0.65; }
+.quit-dialog {
+  position: absolute;
+  z-index: 5;
+  inset: 48px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  padding: 20px;
+  border: 1px solid rgba(255, 132, 132, 0.25);
+  border-radius: 20px;
+  background: rgba(25, 27, 35, 0.98);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+.quit-dialog h1 { margin: 0; font-size: 17px; }
+.quit-dialog p { margin: 0 0 6px; color: #9ba1ab; font-size: 13px; line-height: 1.5; }
 button:focus-visible, input:focus-visible { outline: 2px solid #a9bacf; outline-offset: 2px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 

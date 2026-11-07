@@ -20,6 +20,7 @@ type TaskSnapshot = {
   message: string;
   report: TaskReport | null;
   test_fixture: boolean;
+  cancellation_requested: boolean;
 };
 type ShortcutStatus = {
   accelerator: string;
@@ -68,6 +69,7 @@ export default function App() {
   const [task, setTask] = useState<TaskSnapshot | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
+  const [quitRequested, setQuitRequested] = useState(false);
   const requestInput = useRef<HTMLInputElement>(null);
   const taskRef = useRef<TaskSnapshot | null>(null);
   const showPrototypeStates = import.meta.env.DEV || import.meta.env.VITE_PROTOTYPE_PREVIEWS === "true";
@@ -81,9 +83,9 @@ export default function App() {
       attention: [600, 238],
       settings: [520, 300],
     };
-    const [width, height] = dimensions[state];
+    const [width, height] = quitRequested ? [460, 230] : dimensions[state];
     void getCurrentWindow().setSize(new LogicalSize(width, height)).catch(() => {});
-  }, [state]);
+  }, [state, quitRequested]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -98,6 +100,10 @@ export default function App() {
       setState("settings");
       void refreshShortcut();
     }).then((unlisten) => {
+      if (disposed) unlisten();
+      else listeners.push(unlisten);
+    });
+    void listen("deskact://quit-requested", () => setQuitRequested(true)).then((unlisten) => {
       if (disposed) unlisten();
       else listeners.push(unlisten);
     });
@@ -186,6 +192,15 @@ export default function App() {
     }
   }
 
+  async function stopTask() {
+    if (!task || !isActiveTask(task)) return;
+    try {
+      await invoke("stop_task", { taskId: task.task_id });
+    } catch (error) {
+      setSubmitError(String(error));
+    }
+  }
+
   async function submitRequest(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const submitted = request.trim();
@@ -263,7 +278,12 @@ export default function App() {
 
       {state === "working" && (
         task ? (
-          <TaskStatus task={task} detailsExpanded={detailsExpanded} onToggleDetails={() => setDetailsExpanded((value) => !value)} />
+          <TaskStatus
+            task={task}
+            detailsExpanded={detailsExpanded}
+            onToggleDetails={() => setDetailsExpanded((value) => !value)}
+            onStop={() => void stopTask()}
+          />
         ) : (
           <section className="surface status-surface" aria-label="Simulated task status">
             <span className="activity-dot" aria-hidden="true" />
@@ -288,6 +308,17 @@ export default function App() {
           <div className="button-row">
             <button className="quiet-button" type="button" onClick={() => setState("working")}>Show status preview</button>
             <button className="primary-button" type="button" onClick={() => setState("composer")}>Return to composer</button>
+          </div>
+        </section>
+      )}
+
+      {quitRequested && (
+        <section className="quit-dialog" role="alertdialog" aria-labelledby="quit-title" aria-describedby="quit-description">
+          <h1 id="quit-title">Quit while a task is active?</h1>
+          <p id="quit-description">DeskAct will stop running. Any in-flight app opening may still complete, and its outcome may be uncertain. Quit does not roll back completed effects.</p>
+          <div className="button-row">
+            <button className="quiet-button" type="button" onClick={() => setQuitRequested(false)}>Keep DeskAct open</button>
+            <button className="danger-button" type="button" onClick={() => void invoke("quit_application")}>Quit anyway</button>
           </div>
         </section>
       )}
@@ -322,10 +353,12 @@ function TaskStatus({
   task,
   detailsExpanded,
   onToggleDetails,
+  onStop,
 }: {
   task: TaskSnapshot;
   detailsExpanded: boolean;
   onToggleDetails: () => void;
+  onStop: () => void;
 }) {
   return (
     <section className="surface task-surface" aria-label="Task status">
@@ -335,6 +368,11 @@ function TaskStatus({
         <span>{task.test_fixture ? "No desktop action was dispatched." : task.message}</span>
         {task.test_fixture && <span className="fixture-tag">TEST FIXTURE · result is not native verification</span>}
       </div>
+      {isActiveTask(task) && (
+        <button className="danger-button stop-button" type="button" disabled={task.cancellation_requested} onClick={onStop}>
+          {task.cancellation_requested ? "Stopping…" : "Stop"}
+        </button>
+      )}
       {(task.report || task.phase === "planning" || task.phase === "running") && (
         <button className="quiet-button" type="button" aria-expanded={detailsExpanded} onClick={onToggleDetails}>
           {detailsExpanded ? "Hide details" : "Details"}
