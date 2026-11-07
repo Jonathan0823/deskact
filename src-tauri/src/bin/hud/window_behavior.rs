@@ -98,7 +98,7 @@ pub async fn morph_window(
     let center_x = position.x + (start.width as i32 / 2);
     let top = position.y;
     if start == target {
-        set_rounded_window_region(&window, target.width, target.height, corner_radius, scale)?;
+        update_rounded_window_region(&window, corner_radius, scale)?;
         return Ok(());
     }
     if reduced_motion {
@@ -111,7 +111,7 @@ pub async fn morph_window(
                 top,
             ))
             .map_err(|_| "Could not anchor DeskAct after resize".to_owned())?;
-        set_rounded_window_region(&window, target.width, target.height, corner_radius, scale)?;
+        update_rounded_window_region(&window, corner_radius, scale)?;
         return Ok(());
     }
 
@@ -137,7 +137,7 @@ pub async fn morph_window(
         window
             .set_position(PhysicalPosition::new(center_x - width as i32 / 2, top))
             .map_err(|_| "Could not anchor DeskAct during resize".to_owned())?;
-        set_rounded_window_region(&window, width, height, corner_radius, scale)?;
+        update_rounded_window_region(&window, corner_radius, scale)?;
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
     if app
@@ -155,7 +155,7 @@ pub async fn morph_window(
                 top,
             ))
             .map_err(|_| "Could not anchor DeskAct after resize".to_owned())?;
-        set_rounded_window_region(&window, target.width, target.height, corner_radius, scale)?;
+        update_rounded_window_region(&window, corner_radius, scale)?;
     }
     Ok(())
 }
@@ -246,6 +246,17 @@ fn position_on_foreground_monitor(window: &WebviewWindow, foreground: isize) {
 
 #[cfg(not(windows))]
 fn position_on_foreground_monitor(_window: &WebviewWindow, _foreground: isize) {}
+
+fn update_rounded_window_region(
+    window: &WebviewWindow,
+    corner_radius: f64,
+    scale: f64,
+) -> Result<(), String> {
+    let size = window
+        .outer_size()
+        .map_err(|_| "Could not read DeskAct's outer window size".to_owned())?;
+    set_rounded_window_region(window, size.width, size.height, corner_radius, scale)
+}
 
 #[cfg(windows)]
 fn set_rounded_window_region(
