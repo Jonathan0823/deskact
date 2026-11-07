@@ -54,11 +54,11 @@ jobs:
         run: |
           npm run check
           npm test
-      - name: Build app frontend
-        run: npm run build
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build desktop app and developer harness
-        run: cargo build --manifest-path src-tauri/Cargo.toml --bin deskact --bin deskact-dev --release --features custom-protocol --locked
+      - name: Build DeskAct app with Tauri CLI and bundled frontend
+        run: npm run tauri -- build --no-bundle --features custom-protocol --config src-tauri/tauri.release.conf.json --ci
+      - name: Build developer-only CLI harness
+        run: cargo build --manifest-path src-tauri/Cargo.toml --bin deskact-dev --release --locked
       - name: Run Windows integration tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets --release --locked
       - name: Upload DeskAct app

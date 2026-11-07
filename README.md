@@ -15,7 +15,7 @@ npm ci
 npm run dev:app
 ```
 
-Build the web UI with `npm run build`. Run `npm run dev:app` to start Tauri and its Vite dev server together; the dev URL and Vite bind address are both `127.0.0.1:1420`. Windows CI builds `deskact.exe` with Tauri's custom asset protocol, so it serves the bundled `dist` UI directly and does not need Vite, npm, or a localhost server at runtime. CI publishes the app alone as `deskact-prototype-windows-x64`, plus the optional CLI harness separately as `deskact-dev-harness-windows-x64`; it does not produce an installer. See the [non-destructive HUD task smoke test](docs/implementation/adaptive-island-task-smoke-test.md) for deterministic fixture-mode testing. The fixture adapter is disabled in release builds. Real native-window behavior must still be checked on an interactive Windows desktop.
+Build the web UI with `npm run build`. Run `npm run dev:app` to start Tauri and its Vite dev server together; the dev URL and Vite bind address are both `127.0.0.1:1420`. Windows CI builds `deskact.exe` through Tauri CLI's release build with the custom asset protocol, so it serves the bundled `dist` UI directly and does not need Vite, npm, or a localhost server at runtime. CI publishes the app alone as `deskact-prototype-windows-x64`, plus the optional CLI harness separately as `deskact-dev-harness-windows-x64`; it does not produce an installer. See the [non-destructive HUD task smoke test](docs/implementation/adaptive-island-task-smoke-test.md) for deterministic fixture-mode testing. The fixture adapter is disabled in release builds. Real native-window behavior must still be checked on an interactive Windows desktop.
 
 ## Automation tools are installed separately
 
