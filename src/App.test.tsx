@@ -1,17 +1,30 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import App, { TaskStatus } from "./App";
 
 afterEach(cleanup);
-import App from "./App";
 
-describe("Adaptive Island window prototype", () => {
-  it("starts with a non-executing composer preview", () => {
+const activeTask = {
+  task_id: 7,
+  revision: 1,
+  request: "Open Spotify",
+  phase: "running" as const,
+  message: "Opening Spotify",
+  report: null,
+  test_fixture: false,
+  cancellation_requested: false,
+};
+
+describe("Adaptive Island", () => {
+  it("renders the title-free command capsule and dev-only preview controls", () => {
     render(<App />);
 
     expect(screen.getByRole("textbox", { name: "What would you like DeskAct to do?" })).toBeTruthy();
-    expect(screen.getByText("Prototype only · requests are not executed in browser preview")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Submit request" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("main", { name: "DeskAct Adaptive Island" }).className).toContain("state-composer");
+    expect(screen.queryByText("DeskAct", { selector: ".title" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Run command" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("complementary", { name: "Prototype controls" })).toBeTruthy();
   });
 
   it("does not dispatch browser-preview submissions", async () => {
@@ -19,31 +32,49 @@ describe("Adaptive Island window prototype", () => {
     render(<App />);
 
     await user.type(screen.getByRole("textbox", { name: "What would you like DeskAct to do?" }), "open DeskAct Fixture App");
-    await user.click(screen.getByRole("button", { name: "Submit request" }));
+    await user.click(screen.getByRole("button", { name: "Run command" }));
 
-    expect(screen.getByText("Prototype only · requests are not executed in browser preview")).toBeTruthy();
+    expect(screen.getByRole("main", { name: "DeskAct Adaptive Island" }).className).toContain("state-composer");
+    expect(screen.queryByRole("region", { name: "Task status" })).toBeNull();
   });
 
-  it("shows simulated status and attention previews through explicit controls", async () => {
+  it("switches dev-web presets without dispatching real actions", async () => {
     const user = userEvent.setup();
     render(<App />);
+    const controls = within(screen.getByRole("complementary", { name: "Prototype controls" }));
 
-    await user.click(screen.getByRole("button", { name: "Passive status" }));
-    expect(screen.getByRole("region", { name: "Simulated task status" })).toBeTruthy();
-    expect(screen.getByText("No desktop action is running.")).toBeTruthy();
-
-    await user.click(screen.getByRole("button", { name: "Attention card" }));
-    expect(screen.getByRole("heading", { name: "Window behavior needs validation" })).toBeTruthy();
-    expect(screen.getByText("This prototype does not request approval or control another app.")).toBeTruthy();
+    await user.click(controls.getByRole("button", { name: "Working" }));
+    expect(screen.getByText("Opening Spotify")).toBeTruthy();
+    await user.click(controls.getByRole("button", { name: "Details" }));
+    expect(screen.getByText("Preview only; no desktop action was dispatched or verified.")).toBeTruthy();
+    await user.click(controls.getByRole("button", { name: "Hidden" }));
+    expect(screen.queryByRole("main", { name: "DeskAct Adaptive Island" })).toBeNull();
+    expect(controls.getByRole("button", { name: "Hidden" })).toBeTruthy();
   });
 
-  it("returns from attention preview to the composer", async () => {
+  it("previews approval and completion states without changing desktop state", async () => {
     const user = userEvent.setup();
     render(<App />);
+    const controls = within(screen.getByRole("complementary", { name: "Prototype controls" }));
 
-    await user.click(screen.getByRole("button", { name: "Attention card" }));
-    await user.click(screen.getByRole("button", { name: "Return to composer" }));
+    await user.click(controls.getByRole("button", { name: "Approval" }));
+    expect(screen.getByText("Move 3 selected files to the Recycle Bin?")).toBeTruthy();
+    expect(screen.getByText("Preview only · no files will change")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+    expect(screen.getByText("Playback verified")).toBeTruthy();
+  });
 
-    expect(screen.getByRole("textbox", { name: "What would you like DeskAct to do?" })).toBeTruthy();
+  it("presents task status as a compact island with text controls", async () => {
+    const user = userEvent.setup();
+    const onToggleDetails = vi.fn();
+    const onStop = vi.fn();
+    render(<TaskStatus task={activeTask} detailsExpanded={false} onToggleDetails={onToggleDetails} onStop={onStop} />);
+
+    expect(screen.getByRole("region", { name: "Task status" }).className).toContain("compact-shell");
+    expect(screen.getByText("Opening Spotify")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    expect(onStop).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    expect(onToggleDetails).toHaveBeenCalledOnce();
   });
 });
