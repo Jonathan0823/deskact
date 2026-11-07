@@ -58,7 +58,7 @@ jobs:
         run: npm run build
       - uses: dtolnay/rust-toolchain@stable
       - name: Build desktop app and developer harness
-        run: cargo build --manifest-path src-tauri/Cargo.toml --bin deskact --bin deskact-dev --release --locked
+        run: cargo build --manifest-path src-tauri/Cargo.toml --bin deskact --bin deskact-dev --release --features custom-protocol --locked
       - name: Run Windows integration tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets --release --locked
       - name: Upload DeskAct app
