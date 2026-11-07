@@ -24,9 +24,10 @@ jobs:
           cache: npm
       - name: Install frontend dependencies
         run: npm ci
-      - name: Check and build frontend
+      - name: Check and test frontend
         run: |
           npm run check
+          npm test
           npm run build
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -49,8 +50,11 @@ jobs:
           cache: npm
       - name: Install frontend dependencies
         run: npm ci
-      - name: Build frontend
-        run: npm run build
+      - name: Check and test frontend
+        run: |
+          npm run check
+          npm test
+          npm run build
       - uses: dtolnay/rust-toolchain@stable
       - name: Build desktop app and developer harness
         run: cargo build --manifest-path src-tauri/Cargo.toml --bin deskact --bin deskact-dev --release --locked

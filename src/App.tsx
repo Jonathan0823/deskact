@@ -31,7 +31,13 @@ export default function App() {
         <span className="brand-mark" aria-hidden="true">D</span>
         <span className="brand-name">DeskAct</span>
         <span className="prototype-tag">WINDOW PROTOTYPE</span>
-        <button className="icon-button" type="button" aria-label="Hide prototype window" title="Hide prototype window">
+        <button
+          className="icon-button"
+          type="button"
+          aria-label="Hide prototype window"
+          title="Hide prototype window"
+          onClick={() => { if (isTauri()) void getCurrentWindow().hide(); }}
+        >
           <span aria-hidden="true">−</span>
         </button>
       </header>
