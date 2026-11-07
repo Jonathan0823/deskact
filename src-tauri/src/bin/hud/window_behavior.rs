@@ -36,6 +36,10 @@ fn open_window(app: &AppHandle, event: &str) {
     }
 }
 
+pub fn yield_focus(app: &AppHandle) {
+    restore_foreground(app);
+}
+
 pub fn dismiss(app: &AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
