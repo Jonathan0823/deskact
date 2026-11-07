@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use crate::{
     ActionPlan, ActionPlanStep, AppCatalogEntry, DeskActError, NativeTargetResolution,
-    load_app_catalog, prepare_app_selection,
-    request_action_plan_with_context, validate_action_plan_json,
+    load_app_catalog, prepare_app_selection, request_action_plan_with_context,
+    validate_action_plan_json,
 };
 
 /// Public result from one completed task-execution request.
