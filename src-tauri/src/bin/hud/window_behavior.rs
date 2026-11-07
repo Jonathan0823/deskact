@@ -9,7 +9,10 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
 #[cfg(windows)]
-use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
+use windows_sys::Win32::Graphics::{
+    Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute},
+    Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn},
+};
 
 #[derive(Default)]
 pub struct WindowMorphGeneration(AtomicU64);
@@ -271,6 +274,16 @@ fn set_rounded_window_region(
         .map_err(|_| "Could not access DeskAct's native window handle".to_owned())?;
     let ellipse =
         ((corner_radius.max(0.0) * scale * 2.0).round() as i32).clamp(1, width.min(height) as i32);
+    // Ask DWM to round its own backdrop too; the HRGN below keeps the larger, animated island radius.
+    let corner_preference = DWMWCP_ROUND;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd.0,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            (&corner_preference as *const i32).cast(),
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
     let region =
         unsafe { CreateRoundRectRgn(0, 0, width as i32 + 1, height as i32 + 1, ellipse, ellipse) };
     if region.is_null() {
