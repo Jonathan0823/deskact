@@ -207,25 +207,34 @@ export default function App() {
     }, delay);
   }
 
-  useLayoutEffect(() => {
+  function morphWindowToContent() {
     if (!isTauri()) return;
 
     let width: number;
-    if (quitRequested) width = 500;
-    else if (state === "attention") width = 500;
-    else if (state === "composer") width = 460;
-    else if (state === "settings") width = 480;
-    else if (state === "voice") width = 396;
-    else if (task?.phase === "partial" || task?.phase === "failed") width = 430;
-    else width = task?.phase === "completed" || task?.phase === "cancelled" ? 340 : 430;
+    let cornerRadius: number;
+    if (quitRequested || state === "attention") {
+      width = 500;
+      cornerRadius = 26;
+    } else if (state === "composer") {
+      width = 460;
+      cornerRadius = 52;
+    } else if (state === "settings") {
+      width = 480;
+      cornerRadius = 24;
+    } else if (state === "voice") {
+      width = 396;
+      cornerRadius = 52;
+    } else {
+      width = task?.phase === "completed" || task?.phase === "cancelled" ? 340 : 430;
+      cornerRadius = 44;
+    }
     const height = Math.ceil(islandRef.current?.scrollHeight ?? 88);
-
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    void invoke("morph_island_window", {
-      width,
-      height,
-      reducedMotion,
-    }).catch(() => {});
+    void invoke("morph_island_window", { width, height, cornerRadius, reducedMotion }).catch(() => {});
+  }
+
+  useLayoutEffect(() => {
+    morphWindowToContent();
   }, [state, quitRequested, task?.phase]);
 
   useEffect(() => {
@@ -416,7 +425,7 @@ export default function App() {
   return (
     <div className={`app-shell ${browserPreview ? "web-preview" : "tauri-root"} theme-${resolvedTheme}`} style={shellStyle}>
       <main ref={islandRef} className={`island state-${visualState}${quitRequested ? " quit-confirming" : ""}${displayedState === "hidden" ? " is-hidden" : ""}`} aria-label="DeskAct Adaptive Island" aria-hidden={displayedState === "hidden"} inert={displayedState === "hidden"}>
-      <AnimatePresence mode="popLayout" initial={false}>
+      <AnimatePresence mode="popLayout" initial={false} onExitComplete={morphWindowToContent}>
       <motion.div
         key={contentState}
         className={`island-content state-content-${contentState}`}

@@ -83,9 +83,10 @@ async fn morph_island_window(
     app: tauri::AppHandle,
     width: f64,
     height: f64,
+    corner_radius: f64,
     reduced_motion: bool,
 ) -> Result<(), String> {
-    window_behavior::morph_window(&app, width, height, reduced_motion).await
+    window_behavior::morph_window(&app, width, height, corner_radius, reduced_motion).await
 }
 
 #[tauri::command]

@@ -8,6 +8,9 @@ use std::{
 
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
+#[cfg(windows)]
+use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
+
 #[derive(Default)]
 pub struct WindowMorphGeneration(AtomicU64);
 
@@ -66,6 +69,7 @@ pub async fn morph_window(
     app: &AppHandle,
     width: f64,
     height: f64,
+    corner_radius: f64,
     reduced_motion: bool,
 ) -> Result<(), String> {
     let window = app
@@ -94,6 +98,7 @@ pub async fn morph_window(
     let center_x = position.x + (start.width as i32 / 2);
     let top = position.y;
     if start == target {
+        set_rounded_window_region(&window, target.width, target.height, corner_radius, scale)?;
         return Ok(());
     }
     if reduced_motion {
@@ -106,6 +111,7 @@ pub async fn morph_window(
                 top,
             ))
             .map_err(|_| "Could not anchor DeskAct after resize".to_owned())?;
+        set_rounded_window_region(&window, target.width, target.height, corner_radius, scale)?;
         return Ok(());
     }
 
@@ -131,6 +137,7 @@ pub async fn morph_window(
         window
             .set_position(PhysicalPosition::new(center_x - width as i32 / 2, top))
             .map_err(|_| "Could not anchor DeskAct during resize".to_owned())?;
+        set_rounded_window_region(&window, width, height, corner_radius, scale)?;
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
     if app
@@ -148,6 +155,7 @@ pub async fn morph_window(
                 top,
             ))
             .map_err(|_| "Could not anchor DeskAct after resize".to_owned())?;
+        set_rounded_window_region(&window, target.width, target.height, corner_radius, scale)?;
     }
     Ok(())
 }
@@ -238,3 +246,40 @@ fn position_on_foreground_monitor(window: &WebviewWindow, foreground: isize) {
 
 #[cfg(not(windows))]
 fn position_on_foreground_monitor(_window: &WebviewWindow, _foreground: isize) {}
+
+#[cfg(windows)]
+fn set_rounded_window_region(
+    window: &WebviewWindow,
+    width: u32,
+    height: u32,
+    corner_radius: f64,
+    scale: f64,
+) -> Result<(), String> {
+    let hwnd = window
+        .hwnd()
+        .map_err(|_| "Could not access DeskAct's native window handle".to_owned())?;
+    let ellipse =
+        ((corner_radius.max(0.0) * scale * 2.0).round() as i32).clamp(1, width.min(height) as i32);
+    let region =
+        unsafe { CreateRoundRectRgn(0, 0, width as i32 + 1, height as i32 + 1, ellipse, ellipse) };
+    if region.is_null() {
+        return Err("Could not create DeskAct's rounded window region".to_owned());
+    }
+
+    if unsafe { SetWindowRgn(hwnd.0, region, 1) } == 0 {
+        unsafe { DeleteObject(region) };
+        return Err("Could not apply DeskAct's rounded window region".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn set_rounded_window_region(
+    _window: &WebviewWindow,
+    _width: u32,
+    _height: u32,
+    _corner_radius: f64,
+    _scale: f64,
+) -> Result<(), String> {
+    Ok(())
+}
