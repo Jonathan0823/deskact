@@ -2,15 +2,17 @@
 
 use std::{
     env,
+    future::Future,
     io::{self, Write},
     process::ExitCode,
 };
 
 use deskact_core::{
-    NativeTargetResolution, VerifiedNativeCli, add_user_app_entry, edit_user_app_entry,
-    load_app_catalog, native_inventory, preflight, prepare_app_selection, resolve_native_target,
-    run_calculator_acceptance, run_file_explorer_acceptance, run_notepad_acceptance,
-    run_vlc_acceptance,
+    DeskActError, NativeTargetResolution, VerifiedNativeCli, add_user_app_entry,
+    edit_user_app_entry, load_app_catalog, native_inventory, preflight, prepare_app_selection,
+    request_action_plan, resolve_native_target, run_calculator_acceptance,
+    run_file_explorer_acceptance, run_notepad_acceptance, run_vlc_acceptance, test_llm_connection,
+    validate_action_plan_json,
 };
 
 /// Run the developer-only native preflight, inventory, target-resolution, or acceptance command.
@@ -31,6 +33,10 @@ fn main() -> ExitCode {
         Some("app-catalog") => {
             let arguments: Vec<_> = env::args().skip(2).collect();
             run_app_catalog_command(&arguments)
+        }
+        Some("llm") => {
+            let arguments: Vec<_> = env::args().skip(2).collect();
+            run_llm_command(&arguments)
         }
         Some("resolve") => {
             let mut arguments = env::args().skip(2);
@@ -139,7 +145,7 @@ fn main() -> ExitCode {
 
         _ => {
             eprintln!(
-                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
+                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|llm <test|plan <request>|validate-plan>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
             );
             ExitCode::from(2)
         }
@@ -228,6 +234,66 @@ fn run_app_catalog_command(arguments: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Run one configured LLM connection, planning, or local-validation command.
+fn run_llm_command(arguments: &[String]) -> ExitCode {
+    let result = match arguments {
+        [command] if command == "test" => run_llm_async(test_llm_connection()).map(|report| {
+                let authentication = if report.authentication_accepted {
+                    "authentication accepted"
+                } else {
+                    "authentication not configured"
+                };
+            format!(
+                "LLM connection test: endpoint reachable; {authentication}; response content received; this does not guarantee action-plan compatibility."
+            )
+        }),
+        [command, request @ ..] if command == "plan" && !request.is_empty() => {
+            let request = request.join(" ");
+            run_llm_async(request_action_plan(&request)).and_then(|plan| {
+                serde_json::to_string_pretty(&plan).map_err(|error| {
+                    DeskActError::new(format!("Could not serialize validated action plan: {error}"))
+                })
+            })
+        }
+        [command, flag, response_json]
+            if command == "validate-plan" && flag == "--response-json" =>
+        {
+            validate_action_plan_json(response_json).map(|plan| {
+                format!(
+                    "Validated action plan version {} with {} step(s); this proposal is not authorization to execute.",
+                    plan.version,
+                    plan.steps.len()
+                )
+            })
+        }
+        _ => {
+            eprintln!(
+                "Usage: deskact-dev llm <test|plan <request>|validate-plan --response-json <json>>"
+            );
+            return ExitCode::from(2);
+        }
+    };
+    match result {
+        Ok(message) => {
+            println!("{message}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error.to_string()),
+    }
+}
+
+fn run_llm_async<T>(
+    operation: impl Future<Output = Result<T, DeskActError>>,
+) -> Result<T, DeskActError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            DeskActError::new("Could not initialize the asynchronous HTTP runtime".into())
+        })?;
+    runtime.block_on(operation)
 }
 
 /// Parse repeated `--alias <phrase>` pairs for a new app entry.
