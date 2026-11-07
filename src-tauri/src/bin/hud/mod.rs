@@ -39,7 +39,7 @@ pub fn run() {
             tasks::stop_task,
             yield_focus,
             morph_island_window,
-            set_backdrop_blur,
+            set_backdrop_material,
             quit_application,
             dismiss_island
         ])
@@ -90,8 +90,19 @@ async fn morph_island_window(
 }
 
 #[tauri::command]
-fn set_backdrop_blur(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
-    let effects = enabled.then(|| EffectsBuilder::new().effect(Effect::Acrylic).build());
+fn set_backdrop_material(
+    window: tauri::WebviewWindow,
+    enabled: bool,
+    dark: bool,
+) -> Result<(), String> {
+    let effects = enabled.then(|| {
+        let effect = if dark {
+            Effect::MicaDark
+        } else {
+            Effect::MicaLight
+        };
+        EffectsBuilder::new().effect(effect).build()
+    });
     window
         .set_effects(effects)
         .map_err(|error| format!("Could not update the native backdrop effect: {error}"))

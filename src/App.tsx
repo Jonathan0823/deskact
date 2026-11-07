@@ -43,7 +43,7 @@ type TaskSnapshot = {
   progress?: TaskProgress | null;
 };
 type ThemeMode = "light" | "dark" | "system";
-type AppearanceSettings = { theme: ThemeMode; opacity: number; blur: number };
+type AppearanceSettings = { theme: ThemeMode; opacity: number; micaEnabled: boolean };
 type ShortcutStatus = {
   accelerator: string;
   registered: boolean;
@@ -51,15 +51,15 @@ type ShortcutStatus = {
 };
 
 const appearanceStorageKey = "deskact-appearance-v1";
-const defaultAppearance: AppearanceSettings = { theme: "light", opacity: 48, blur: 32 };
+const defaultAppearance: AppearanceSettings = { theme: "light", opacity: 48, micaEnabled: true };
 function readAppearance(): AppearanceSettings {
   try {
-    const saved = JSON.parse(localStorage.getItem(appearanceStorageKey) ?? "null") as Partial<AppearanceSettings> | null;
+    const saved = JSON.parse(localStorage.getItem(appearanceStorageKey) ?? "null") as (Partial<AppearanceSettings> & { blur?: number }) | null;
     if (!saved) return defaultAppearance;
     return {
       theme: saved.theme === "dark" || saved.theme === "system" ? saved.theme : "light",
       opacity: typeof saved.opacity === "number" ? Math.max(18, Math.min(85, saved.opacity)) : defaultAppearance.opacity,
-      blur: typeof saved.blur === "number" ? Math.max(0, Math.min(50, saved.blur)) : defaultAppearance.blur,
+      micaEnabled: typeof saved.micaEnabled === "boolean" ? saved.micaEnabled : typeof saved.blur === "number" ? saved.blur > 0 : defaultAppearance.micaEnabled,
     };
   } catch {
     return defaultAppearance;
@@ -156,7 +156,7 @@ export default function App() {
   const browserPreview = import.meta.env.DEV && !isTauri();
   const prefersReducedMotion = useReducedMotion();
   const resolvedTheme = appearance.theme === "system" ? (systemPrefersDark ? "dark" : "light") : appearance.theme;
-  const shellStyle = { "--glass-opacity": appearance.opacity / 100, "--glass-blur": `${appearance.blur}px` } as CSSProperties;
+  const shellStyle = { "--glass-opacity": appearance.opacity / 100, "--glass-blur": appearance.micaEnabled ? "32px" : "0px" } as CSSProperties;
   const displayedState = browserPreview ? previewView(previewState) : islandVisible ? state : "hidden";
   const displayedTask = browserPreview ? previewTask(previewState, previewStep) : task;
   const lastPreviewState = useRef<PreviewState>("command");
@@ -190,8 +190,8 @@ export default function App() {
 
   useEffect(() => {
     if (!isTauri()) return;
-    void invoke("set_backdrop_blur", { enabled: appearance.blur > 0 }).catch(() => {});
-  }, [appearance.blur]);
+    void invoke("set_backdrop_material", { enabled: appearance.micaEnabled, dark: resolvedTheme === "dark" }).catch(() => {});
+  }, [appearance.micaEnabled, resolvedTheme]);
 
   function dismissIsland() {
     if (browserPreview) {
@@ -529,11 +529,11 @@ export default function App() {
           </div>
           <div className="range-setting"><label htmlFor="glass-opacity">Glass opacity</label><output>{appearance.opacity}%</output><input id="glass-opacity" type="range" min="18" max="85" value={appearance.opacity} onChange={(event) => setAppearance((value) => ({ ...value, opacity: Number(event.target.value) }))} /></div>
           <div className="toggle-setting">
-            <span id="glass-blur-label">Backdrop blur</span>
-            <button id="glass-blur" className="toggle-switch" type="button" role="switch" aria-labelledby="glass-blur-label" aria-checked={appearance.blur > 0} onClick={() => setAppearance((value) => ({ ...value, blur: value.blur > 0 ? 0 : 32 }))}>
+            <span id="mica-material-label">Mica material</span>
+            <button id="mica-material" className="toggle-switch" type="button" role="switch" aria-labelledby="mica-material-label" aria-checked={appearance.micaEnabled} onClick={() => setAppearance((value) => ({ ...value, micaEnabled: !value.micaEnabled }))}>
               <span className="toggle-thumb" />
             </button>
-            <span className="toggle-value">{appearance.blur > 0 ? "On" : "Off"}</span>
+            <span className="toggle-value">{appearance.micaEnabled ? "On" : "Off"}</span>
           </div>
           {!browserPreview && <>
           <h2 className="settings-subheading">Global shortcut</h2>
