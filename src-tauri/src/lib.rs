@@ -26,6 +26,12 @@ pub use llm::{
     ActionPlan, ActionPlanStep, LlmConnectionReport, request_action_plan, test_llm_connection,
     validate_action_plan_json,
 };
+mod task;
+pub use task::{
+    CancellationToken, DeliveryDisposition, MutationLease, PostconditionState, RecoveryDecision,
+    TaskCoordinator, TaskSimulationReport, may_resume_after_interference, recovery_decision,
+    requires_fresh_observation, simulate_task_scenario,
+};
 mod windows_catalog;
 pub use windows_catalog::{
     CatalogDiscovery, DiscoveredApp, DiscoverySource, discover_app_catalog, process_image_path,
