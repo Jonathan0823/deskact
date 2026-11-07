@@ -34,6 +34,18 @@ npm run dev:app
 
 Open DeskAct from the tray or global shortcut, submit `open DeskAct Fixture App`, and confirm that the status changes from planning to a clearly marked simulated outcome. Verify that no application launches. To check Stop without native effects, set `$env:DESKACT_HUD_TEST_FIXTURE_DELAY_MS = '5000'`, submit the same request, then press Stop while the fixture is waiting; it should end as cancelled and explicitly report that no desktop action was dispatched. Clear both environment variables after the test. Do not distribute a debug build with fixture mode enabled.
 
+## Active-task controls (fixture-only)
+
+With fixture mode and `$env:DESKACT_HUD_TEST_FIXTURE_DELAY_MS = '10000'`, submit the fixture request and check these interactions before the delay ends:
+
+1. Expand and collapse Details; the same request and revisioned status must remain intact.
+2. Submit a second request while the first is active; DeskAct must show busy, not queue it. After the first task ends, the second request should not start by itself.
+3. Press Escape to hide the island, then reopen with the global shortcut or tray; the same active request and status should reappear from Rust state.
+4. Press Stop and confirm the final state is cancelled, no desktop action was dispatched, and another request can then be explicitly submitted.
+5. Start another delayed fixture task and choose Quit from the tray or close control; confirm the uncertainty disclosure, choose Keep DeskAct open, then stop the fixture task.
+
+To check the explicit quit path, start one more delayed fixture task, choose Quit anyway in the confirmation dialog, and confirm the app exits. No OS action is performed in fixture mode.
+
 ## Real supported path
 
 For a real app-opening check, unset `DESKACT_HUD_TEST_FIXTURE`, install the documented `agent-desktop` prerequisite, open the island, and request one exact catalog app name. Confirm that completion appears only after Rust reports a unique accessible native window and fresh accessibility snapshot. Unsupported requests should fail without launching anything. This test runs only on a Windows desktop and may alter foreground/window state for the specifically requested app.
