@@ -226,6 +226,39 @@ fn llm_plan_requests_one_correction_for_an_invalid_plan_then_returns_validated_j
 }
 
 #[test]
+fn llm_plan_suppresses_a_valid_plan_that_echoes_the_configured_credential() {
+    let secret = "fixture-secret-never-print";
+    let plan = format!(
+        r#"{{"version":1,"summary":"Plan","steps":[{{"operation":"open_app","parameters":{{"echo":"{secret}"}},"expected_outcome":"App is open"}}]}}"#
+    );
+    let response = serde_json::json!({"choices":[{"message":{"content":plan}}]}).to_string();
+    let endpoint = LoopbackEndpoint::respond(200, "OK", &response);
+    let output = Command::new(env!("CARGO_BIN_EXE_deskact-dev"))
+        .args(["llm", "plan", "Open an app"])
+        .env("DESKACT_LLM_BASE_URL", &endpoint.base_url)
+        .env("DESKACT_LLM_MODEL", "fixture-model")
+        .env("DESKACT_LLM_API_KEY", secret)
+        .output()
+        .expect("run developer harness");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let requests = endpoint.requests.join().expect("fixture request thread");
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("plan contains the configured credential and was suppressed"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains(secret), "{stdout}");
+    assert!(!stderr.contains(secret), "{stderr}");
+    assert_eq!(
+        requests.len(),
+        1,
+        "a credential echo is not corrected or retried"
+    );
+}
+
+#[test]
 fn llm_plan_fails_after_one_invalid_correction() {
     let invalid_plan = r#"{"version":1,"summary":"Open Calculator","steps":[]}"#;
     let response =

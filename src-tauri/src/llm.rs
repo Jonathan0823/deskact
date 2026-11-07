@@ -280,7 +280,7 @@ pub async fn request_action_plan(request: &str) -> Result<ActionPlan, DeskActErr
         ])
         .await?;
     let first_error = match validate_action_plan_json(&first_response) {
-        Ok(plan) => return Ok(plan),
+        Ok(plan) => return reject_credential_echo(plan, &config),
         Err(error) => error.to_string(),
     };
 
@@ -302,11 +302,53 @@ pub async fn request_action_plan(request: &str) -> Result<ActionPlan, DeskActErr
             },
         ])
         .await?;
-    validate_action_plan_json(&corrected_response).map_err(|error| {
+    let plan = validate_action_plan_json(&corrected_response).map_err(|error| {
         DeskActError::new(format!(
             "Primary model returned an invalid action plan after one bounded correction attempt: {error}"
         ))
-    })
+    })?;
+    reject_credential_echo(plan, &config)
+}
+
+fn reject_credential_echo(
+    plan: ActionPlan,
+    config: &LlmConfig,
+) -> Result<ActionPlan, DeskActError> {
+    let Some(credential) = config
+        .api_key
+        .as_ref()
+        .and_then(|header| header.to_str().ok())
+        .and_then(|header| header.strip_prefix("Bearer "))
+    else {
+        return Ok(plan);
+    };
+    if plan.summary.contains(credential)
+        || plan.steps.iter().any(|step| {
+            step.operation.contains(credential)
+                || step.expected_outcome.contains(credential)
+                || step.parameters.iter().any(|(key, value)| {
+                    key.contains(credential) || value_contains_credential(value, credential)
+                })
+        })
+    {
+        return Err(DeskActError::new(
+            "Validated action plan contains the configured credential and was suppressed".into(),
+        ));
+    }
+    Ok(plan)
+}
+
+fn value_contains_credential(value: &Value, credential: &str) -> bool {
+    match value {
+        Value::String(value) => value.contains(credential),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| value_contains_credential(value, credential)),
+        Value::Object(values) => values.iter().any(|(key, value)| {
+            key.contains(credential) || value_contains_credential(value, credential)
+        }),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
 }
 
 /// Parse and semantically validate a complete version-1 action plan.
