@@ -10,7 +10,7 @@ use deskact_core::{
     NativeTargetResolution, VerifiedNativeCli, add_user_app_entry, edit_user_app_entry,
     load_app_catalog, native_inventory, preflight, prepare_app_selection, resolve_native_target,
     run_calculator_acceptance, run_file_explorer_acceptance, run_notepad_acceptance,
-    run_vlc_acceptance,
+    run_vlc_acceptance, validate_action_plan_json,
 };
 
 /// Run the developer-only native preflight, inventory, target-resolution, or acceptance command.
@@ -31,6 +31,10 @@ fn main() -> ExitCode {
         Some("app-catalog") => {
             let arguments: Vec<_> = env::args().skip(2).collect();
             run_app_catalog_command(&arguments)
+        }
+        Some("llm") => {
+            let arguments: Vec<_> = env::args().skip(2).collect();
+            run_llm_command(&arguments)
         }
         Some("resolve") => {
             let mut arguments = env::args().skip(2);
@@ -139,7 +143,7 @@ fn main() -> ExitCode {
 
         _ => {
             eprintln!(
-                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
+                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|llm validate-plan --response-json <json>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
             );
             ExitCode::from(2)
         }
@@ -227,6 +231,36 @@ fn run_app_catalog_command(arguments: &[String]) -> ExitCode {
             eprintln!("App catalog operation failed: {error}");
             ExitCode::from(1)
         }
+    }
+}
+
+/// Run the local action-plan validator without contacting an LLM endpoint.
+fn run_llm_command(arguments: &[String]) -> ExitCode {
+    let result = match arguments {
+        [command, flag, response_json]
+            if command == "validate-plan" && flag == "--response-json" =>
+        {
+            validate_action_plan_json(response_json).map(|plan| {
+                format!(
+                    "Validated action plan version {} with {} step(s); this proposal is not authorization to execute.",
+                    plan.version,
+                    plan.steps.len()
+                )
+            })
+        }
+        _ => {
+            eprintln!(
+                "Usage: deskact-dev llm validate-plan --response-json <json>"
+            );
+            return ExitCode::from(2);
+        }
+    };
+    match result {
+        Ok(message) => {
+            println!("{message}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error.to_string()),
     }
 }
 

@@ -21,6 +21,8 @@ pub use app_catalog::{
     ModelAppSelection, add_user_app_entry, edit_user_app_entry, load_app_catalog,
     prepare_app_selection, validate_model_app_selection,
 };
+mod llm;
+pub use llm::{ActionPlan, ActionPlanStep, validate_action_plan_json};
 mod windows_catalog;
 pub use windows_catalog::{
     CatalogDiscovery, DiscoveredApp, DiscoverySource, discover_app_catalog, process_image_path,
