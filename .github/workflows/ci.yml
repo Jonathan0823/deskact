@@ -14,6 +14,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl wget file pkg-config libdbus-1-dev libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev libwebkit2gtk-4.1-dev
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Check and build frontend
+        run: |
+          npm run check
+          npm run build
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -25,19 +39,29 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
 
   windows-build:
-    name: Build all targets (Windows x64)
+    name: Build Windows app and developer harness (x64)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build frontend
+        run: npm run build
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build all targets
-        run: cargo build --manifest-path src-tauri/Cargo.toml --all-targets --release --locked
+      - name: Build desktop app and developer harness
+        run: cargo build --manifest-path src-tauri/Cargo.toml --bin deskact --bin deskact-dev --release --locked
       - name: Run Windows integration tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets --release --locked
-      - name: Upload Windows developer harness
+      - name: Upload Windows app and developer harness
         uses: actions/upload-artifact@v7
         with:
-          name: deskact-dev-windows-x64
-          path: src-tauri/target/release/deskact-dev.exe
+          name: deskact-windows-x64
+          path: |
+            src-tauri/target/release/deskact.exe
+            src-tauri/target/release/deskact-dev.exe
           if-no-files-found: error
           retention-days: 14

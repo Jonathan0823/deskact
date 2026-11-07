@@ -1,6 +1,19 @@
 # DeskAct
 
-DeskAct is a Windows-first, accessibility-first desktop assistant for finding, opening, and controlling supported apps. The product is in the specification and Windows validation stage; the DeskAct application is not yet released. See the [Product Requirements Document](docs/DeskAct_PRD_v1.14.md), [Glossary](GLOSSARY.md), and proposed [Adaptive Island UI/UX spec](design/ui/DeskAct_Adaptive_Island_UI_Spec_v0.1.md). The UI spec is a text proposal, not a visual mockup or implemented application.
+DeskAct is a Windows-first, accessibility-first desktop assistant for finding, opening, and controlling supported apps. The product is in the specification and Windows validation stage; the DeskAct application is not yet released. The Adaptive Island Windows host is an early prototype: native focus, click-through, DPI, and monitor behavior still require live Windows validation. See the [Product Requirements Document](docs/DeskAct_PRD_v1.14.md), [Glossary](GLOSSARY.md), and [Adaptive Island UI/UX spec](design/ui/DeskAct_Adaptive_Island_UI_Spec_v0.1.md).
+
+## Adaptive Island app prototype
+
+The repository now contains an early Tauri v2 + React/Tailwind Windows app shell. Its composer, passive-status, and attention-card previews are simulated design states; they do not run desktop actions or request approval. The initial native window is frameless, transparent, and positioned near the top center of its launch monitor. Real click-through/focus behavior, monitor recovery, global invocation, and task handling are not yet validated or implemented.
+
+With Node.js 24+ and a Rust toolchain installed, run the app from the repository root:
+
+```sh
+npm ci
+npm run dev:app
+```
+
+Build the web UI with `npm run build`. Windows CI builds the `deskact.exe` app host and publishes it alongside the developer harness; it does not produce an installer. Tauri native-window behavior must still be checked on an interactive Windows desktop.
 
 ## Automation tools are installed separately
 
