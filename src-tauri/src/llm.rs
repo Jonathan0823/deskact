@@ -1,7 +1,8 @@
-//! Versioned action-plan schema and local semantic validation.
+//! Chat Completions requests and locally validated action plans.
 
-use std::collections::BTreeMap;
+use std::{env, net::IpAddr, time::Duration};
 
+use reqwest::{Client, Url, header::HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -12,6 +13,8 @@ const MAX_ACTION_PLAN_BYTES: usize = 32 * 1024;
 const MAX_ACTION_PLAN_STEPS: usize = 20;
 const MAX_ACTION_TEXT_LENGTH: usize = 500;
 const MAX_OPERATION_LENGTH: usize = 80;
+const MAX_COMPLETION_BYTES: usize = 64 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A complete, locally validated proposal from the primary model; not authorization to execute.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -32,9 +35,224 @@ pub struct ActionPlanStep {
     /// Operation identifier; execution support is determined later by Rust policy.
     pub operation: String,
     /// Structured operation parameters, never treated as permission by themselves.
-    pub parameters: BTreeMap<String, Value>,
+    pub parameters: std::collections::BTreeMap<String, Value>,
     /// Observable outcome expected if the operation succeeds.
     pub expected_outcome: String,
+}
+
+/// Result of the no-actions synthetic endpoint check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LlmConnectionReport {
+    /// Whether a credential was sent and accepted by the endpoint.
+    pub authentication_accepted: bool,
+    /// Whether the endpoint returned non-empty completion content.
+    pub response_content_received: bool,
+}
+
+struct LlmConfig {
+    chat_completions_url: Url,
+    model: String,
+    api_key: Option<HeaderValue>,
+}
+
+impl LlmConfig {
+    fn from_env() -> Result<Self, DeskActError> {
+        let base_url = env::var("DESKACT_LLM_BASE_URL").map_err(|_| {
+            DeskActError::new(
+                "Set DESKACT_LLM_BASE_URL to the configured Chat Completions endpoint base URL"
+                    .into(),
+            )
+        })?;
+        let model = env::var("DESKACT_LLM_MODEL").map_err(|_| {
+            DeskActError::new("Set DESKACT_LLM_MODEL to an explicit model identifier".into())
+        })?;
+        if model.trim().is_empty()
+            || model.chars().count() > 200
+            || model.chars().any(char::is_control)
+        {
+            return Err(DeskActError::new(
+                "DESKACT_LLM_MODEL must be a non-empty identifier of at most 200 characters".into(),
+            ));
+        }
+
+        let mut base_url = Url::parse(&base_url).map_err(|_| {
+            DeskActError::new("DESKACT_LLM_BASE_URL must be a valid absolute URL".into())
+        })?;
+        if !base_url.username().is_empty()
+            || base_url.password().is_some()
+            || base_url.query().is_some()
+            || base_url.fragment().is_some()
+        {
+            return Err(DeskActError::new(
+                "DESKACT_LLM_BASE_URL must not contain credentials, a query, or a fragment".into(),
+            ));
+        }
+        if base_url.scheme() != "https"
+            && !(base_url.scheme() == "http" && is_loopback_host(&base_url))
+        {
+            return Err(DeskActError::new(
+                "Use HTTPS for remote LLM endpoints; HTTP is permitted only for loopback endpoints"
+                    .into(),
+            ));
+        }
+        if !base_url.path().ends_with('/') {
+            base_url.set_path(&format!("{}/", base_url.path()));
+        }
+        let chat_completions_url = base_url.join("chat/completions").map_err(|_| {
+            DeskActError::new("Could not construct the Chat Completions endpoint URL".into())
+        })?;
+
+        let api_key = match env::var("DESKACT_LLM_API_KEY") {
+            Ok(value) if !value.is_empty() => Some(
+                HeaderValue::from_str(&format!("Bearer {value}")).map_err(|_| {
+                    DeskActError::new(
+                        "DESKACT_LLM_API_KEY contains invalid header characters".into(),
+                    )
+                })?,
+            ),
+            Ok(_) | Err(env::VarError::NotPresent) => None,
+            Err(env::VarError::NotUnicode(_)) => {
+                return Err(DeskActError::new(
+                    "DESKACT_LLM_API_KEY must be valid UTF-8".into(),
+                ));
+            }
+        };
+
+        Ok(Self {
+            chat_completions_url,
+            model,
+            api_key,
+        })
+    }
+
+    fn client(&self) -> Result<Client, DeskActError> {
+        Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| DeskActError::new("Could not initialize the HTTP client".into()))
+    }
+
+    async fn complete(&self, messages: Vec<ChatMessage>) -> Result<String, DeskActError> {
+        let client = self.client()?;
+        let mut request = client
+            .post(self.chat_completions_url.clone())
+            .json(&ChatRequest {
+                model: &self.model,
+                messages,
+            });
+        if let Some(api_key) = &self.api_key {
+            request = request.header(reqwest::header::AUTHORIZATION, api_key.clone());
+        }
+        let response = request.send().await.map_err(|error| {
+            if error.is_timeout() {
+                DeskActError::new("Chat Completions request timed out".into())
+            } else {
+                DeskActError::new("Could not reach the configured Chat Completions endpoint".into())
+            }
+        })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(DeskActError::new(format!(
+                "Endpoint reachable, authentication rejected (HTTP {})",
+                status.as_u16()
+            )));
+        }
+        if !status.is_success() {
+            return Err(DeskActError::new(format!(
+                "Endpoint reachable, but Chat Completions returned HTTP {}",
+                status.as_u16()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_COMPLETION_BYTES as u64)
+        {
+            return Err(DeskActError::new(format!(
+                "Chat Completions response exceeds the {MAX_COMPLETION_BYTES}-byte limit"
+            )));
+        }
+        let mut response = response;
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| DeskActError::new("Could not read the Chat Completions response".into()))?
+        {
+            if body.len() + chunk.len() > MAX_COMPLETION_BYTES {
+                return Err(DeskActError::new(format!(
+                    "Chat Completions response exceeds the {MAX_COMPLETION_BYTES}-byte limit"
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let response: ChatResponse = serde_json::from_slice(&body).map_err(|_| {
+            DeskActError::new(
+                "Endpoint reachable, but response did not match the Chat Completions response shape"
+                    .into(),
+            )
+        })?;
+        let content = response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|choice| choice.message.content)
+            .filter(|content| !content.trim().is_empty())
+            .ok_or_else(|| {
+                DeskActError::new(
+                    "Endpoint reachable, but response contained no completion content".into(),
+                )
+            })?;
+        Ok(content)
+    }
+}
+
+#[derive(Serialize)]
+struct ChatRequest<'a> {
+    model: &'a str,
+    messages: Vec<ChatMessage>,
+}
+
+#[derive(Serialize)]
+struct ChatMessage {
+    role: &'static str,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct ChatResponse {
+    choices: Vec<ChatChoice>,
+}
+
+#[derive(Deserialize)]
+struct ChatChoice {
+    message: ChatMessageResponse,
+}
+
+#[derive(Deserialize)]
+struct ChatMessageResponse {
+    content: Option<String>,
+}
+
+/// Send a synthetic, non-sensitive request without executing any desktop action.
+pub async fn test_llm_connection() -> Result<LlmConnectionReport, DeskActError> {
+    let config = LlmConfig::from_env()?;
+    let content = config
+        .complete(vec![
+            ChatMessage {
+                role: "system",
+                content: "This is a synthetic connectivity check. Return a short plain-text reply; do not propose or execute desktop actions.".into(),
+            },
+            ChatMessage {
+                role: "user",
+                content: "Reply with the words: DeskAct synthetic connection check.".into(),
+            },
+        ])
+        .await?;
+    Ok(LlmConnectionReport {
+        authentication_accepted: config.api_key.is_some(),
+        response_content_received: !content.trim().is_empty(),
+    })
 }
 
 /// Parse and semantically validate a complete version-1 action plan.
@@ -70,6 +288,18 @@ pub fn validate_action_plan_json(response: &str) -> Result<ActionPlan, DeskActEr
         )?;
     }
     Ok(plan)
+}
+
+fn is_loopback_host(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn validate_text(value: &str, max_length: usize, field: &str) -> Result<(), DeskActError> {

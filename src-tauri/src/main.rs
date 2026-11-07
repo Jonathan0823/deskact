@@ -10,7 +10,7 @@ use deskact_core::{
     NativeTargetResolution, VerifiedNativeCli, add_user_app_entry, edit_user_app_entry,
     load_app_catalog, native_inventory, preflight, prepare_app_selection, resolve_native_target,
     run_calculator_acceptance, run_file_explorer_acceptance, run_notepad_acceptance,
-    run_vlc_acceptance, validate_action_plan_json,
+    run_vlc_acceptance, test_llm_connection, validate_action_plan_json,
 };
 
 /// Run the developer-only native preflight, inventory, target-resolution, or acceptance command.
@@ -143,7 +143,7 @@ fn main() -> ExitCode {
 
         _ => {
             eprintln!(
-                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|llm validate-plan --response-json <json>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
+                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|llm <test|validate-plan>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
             );
             ExitCode::from(2)
         }
@@ -237,6 +237,25 @@ fn run_app_catalog_command(arguments: &[String]) -> ExitCode {
 /// Run the local action-plan validator without contacting an LLM endpoint.
 fn run_llm_command(arguments: &[String]) -> ExitCode {
     let result = match arguments {
+        [command] if command == "test" => {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(_) => return fail("Could not initialize the asynchronous HTTP runtime".into()),
+            };
+            runtime.block_on(test_llm_connection()).map(|report| {
+                let authentication = if report.authentication_accepted {
+                    "authentication accepted"
+                } else {
+                    "authentication not configured"
+                };
+                format!(
+                    "LLM connection test: endpoint reachable; {authentication}; response content received; this does not guarantee action-plan compatibility."
+                )
+            })
+        }
         [command, flag, response_json]
             if command == "validate-plan" && flag == "--response-json" =>
         {
@@ -250,7 +269,7 @@ fn run_llm_command(arguments: &[String]) -> ExitCode {
         }
         _ => {
             eprintln!(
-                "Usage: deskact-dev llm validate-plan --response-json <json>"
+                "Usage: deskact-dev llm <test|validate-plan --response-json <json>>"
             );
             return ExitCode::from(2);
         }
