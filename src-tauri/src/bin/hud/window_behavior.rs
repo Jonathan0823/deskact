@@ -4,6 +4,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 
 pub const INVOKED_EVENT: &str = "deskact://invoked";
 pub const SETTINGS_EVENT: &str = "deskact://open-settings";
+pub const QUIT_REQUESTED_EVENT: &str = "deskact://quit-requested";
 
 #[derive(Default)]
 pub struct PreviousForegroundWindow(Mutex<Option<isize>>);
@@ -14,6 +15,18 @@ pub fn open_composer(app: &AppHandle) {
 
 pub fn open_settings(app: &AppHandle) {
     open_window(app, SETTINGS_EVENT);
+}
+
+pub fn request_quit(app: &AppHandle) {
+    if app.state::<super::tasks::TaskHub>().has_active_task() {
+        open_window(app, QUIT_REQUESTED_EVENT);
+    } else {
+        app.exit(0);
+    }
+}
+
+pub fn quit_application(app: &AppHandle) {
+    app.exit(0);
 }
 
 fn open_window(app: &AppHandle, event: &str) {

@@ -4,7 +4,7 @@ mod tray;
 mod window_behavior;
 
 use shortcuts::{ShortcutState, ShortcutStatus};
-use tasks::{TaskHub, get_last_task_result, get_task_snapshot, submit_task};
+use tasks::TaskHub;
 use tauri::Manager;
 
 pub fn run() {
@@ -24,12 +24,20 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_shortcut_status,
             update_global_shortcut,
-            get_task_snapshot,
-            get_last_task_result,
-            submit_task,
+            tasks::get_task_snapshot,
+            tasks::get_last_task_result,
+            tasks::submit_task,
+            tasks::stop_task,
             yield_focus,
+            quit_application,
             dismiss_island
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                window_behavior::request_quit(window.app_handle());
+            }
+        })
         .setup(|app| {
             let state = app.state::<ShortcutState>();
             shortcuts::install_shortcut(app.handle(), state.inner());
@@ -57,6 +65,11 @@ fn update_global_shortcut(
 #[tauri::command]
 fn yield_focus(app: tauri::AppHandle) {
     window_behavior::yield_focus(&app);
+}
+
+#[tauri::command]
+fn quit_application(app: tauri::AppHandle) {
+    window_behavior::quit_application(&app);
 }
 
 #[tauri::command]

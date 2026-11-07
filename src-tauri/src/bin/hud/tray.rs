@@ -22,7 +22,7 @@ pub fn install(app: &mut App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             OPEN_MENU_ID => super::window_behavior::open_composer(app),
             SETTINGS_MENU_ID => super::window_behavior::open_settings(app),
-            QUIT_MENU_ID => app.exit(0),
+            QUIT_MENU_ID => super::window_behavior::request_quit(app),
             _ => {}
         })
         .build(app)?;
