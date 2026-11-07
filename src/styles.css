@@ -13,10 +13,20 @@
 }
 
 * { box-sizing: border-box; }
-html, body, #root { width: 100%; margin: 0; background: transparent; }
+html, body, #root { width: 100%; height: 100%; margin: 0; background: transparent; }
 body { min-width: 280px; color: #f7f9fc; }
 button, input { font: inherit; }
 button { color: inherit; cursor: pointer; }
+.tauri-root { display: flex; width: 100%; height: 100vh; align-items: flex-start; justify-content: center; }
+.tauri-root .island { height: auto; min-height: 0; margin: 0; }
+.tauri-root .island.state-composer { width: 506px; }
+.tauri-root .island.state-working { width: 352px; }
+.tauri-root .island.state-done, .tauri-root .island.state-cancelled { width: 296px; }
+.tauri-root .island.state-error { width: 366px; }
+.tauri-root .island.state-attention { width: 490px; }
+.tauri-root .island.state-settings { width: 520px; }
+.tauri-root .island.expanded { width: 502px; }
+.tauri-root .island.quit-confirming { min-height: 220px; width: 490px; }
 
 .web-preview {
   position: relative;
@@ -37,21 +47,29 @@ button { color: inherit; cursor: pointer; }
   background: #000;
   box-shadow: 0 14px 42px rgb(6 12 31 / 24%);
   transform-origin: top center;
-  transition: width 220ms cubic-bezier(.2,.8,.2,1), border-radius 200ms ease;
+  transition: width 260ms cubic-bezier(.22,1,.36,1), height 260ms cubic-bezier(.22,1,.36,1), border-radius 260ms cubic-bezier(.22,1,.36,1), opacity 200ms ease, transform 240ms cubic-bezier(.22,1,.36,1), visibility 0s linear 240ms;
 }
+.island.is-hidden { opacity: 0; transform: translateY(-18px) scale(.94); visibility: hidden; pointer-events: none; }
+.island-content { position: relative; width: 100%; }
+.island:not(.is-hidden) { visibility: visible; transition-delay: 0s; }
 .state-composer { width: min(100%, 506px); }
 .state-working { width: min(100%, 352px); }
 .state-done, .state-cancelled { width: min(100%, 296px); }
 .state-error { width: min(100%, 366px); }
-.state-error .status-title { color: #e59a9d; }
+.state-error .status-title { color: #f0a6a8; }
 .state-error .status-sub { color: #bd858a; }
 .state-done .status-title { color: #81cfaa; }
+.state-voice { width: min(100%, 292px); }
+.state-transcribing { width: min(100%, 360px); border-radius: 23px; }
+.state-error, .state-done, .state-cancelled, .state-working { border-radius: 34px; }
 .state-attention { width: min(100%, 490px); border-radius: 23px; }
 .state-settings { width: min(100%, 520px); border-radius: 23px; }
 .island.expanded { width: min(100%, 502px); border-radius: 23px; }
+.quit-confirming { min-height: 220px; }
 
 .shell { padding: 16px 17px 12px; }
-.composer-shell { min-height: 88px; }
+.composer-shell { min-height: 0; }
+.tauri-root .composer-shell { padding-bottom: 12px; }
 .input-row { display: flex; align-items: center; gap: 12px; }
 .command-input {
   width: 100%;
@@ -84,9 +102,14 @@ button { color: inherit; cursor: pointer; }
   transition: background 120ms ease, transform 120ms ease;
 }
 .play-button:hover:not(:disabled) { background: #d7e1ff; transform: scale(1.04); }
+.voice-button { display: grid; width: 30px; height: 30px; flex: 0 0 auto; place-items: center; padding: 0; color: #bccbe7; border: 1px solid #ffffff1a; border-radius: 50%; background: #2a3040; }
+.voice-button:hover { color: #fff; background: #39435a; }
 .play-button:disabled { cursor: default; opacity: .45; }
 .play-button svg { display: block; }
-.composer-hints { display: flex; justify-content: space-between; margin-top: 8px; color: #747b87; font-size: 9px; }
+.composer-hints { display: flex; min-height: 30px; align-items: center; justify-content: space-between; margin-top: 8px; color: #747b87; font-size: 9px; }
+.composer-voice-entry, .composer-key-hints { display: flex; align-items: center; gap: 8px; }
+.composer-voice-entry { color: #9298a3; }
+.composer-key-hints { gap: 12px; }
 .error-message { margin: 8px 0 0; color: #e59a9d; font-size: 10px; line-height: 1.5; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
@@ -102,9 +125,23 @@ button { color: inherit; cursor: pointer; }
 .status-title { overflow: hidden; color: #f7f9fc; font-size: 13px; font-weight: 650; letter-spacing: -.1px; text-overflow: ellipsis; white-space: nowrap; }
 .status-sub { overflow: hidden; color: #9298a3; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .status-trigger { display: grid; min-width: 0; gap: 3px; padding: 0; text-align: left; border: 0; background: transparent; }
+.compact-shell.with-icon { grid-template-columns: 36px minmax(0, 1fr) auto; }
+.compact-shell.with-icon.has-stop { grid-template-columns: 36px minmax(0, 1fr) auto auto; }
+.compact-icon { display: grid; width: 36px; height: 36px; flex: 0 0 auto; place-items: center; color: #b4c8ff; border-radius: 50%; background: #313c53; }
+.compact-icon svg { display: block; }
+.compact-icon.success { color: #80d2af; background: #243b38; }
+.compact-icon.danger { color: #f0a6a8; background: #463037; }
+.compact-icon.muted-icon { color: #a2acc0; background: #292e39; }
+.loading-icon { animation: spin 2s linear infinite; }
+.completed-icon { stroke-dasharray: 26; stroke-dashoffset: 26; animation: check-draw 320ms cubic-bezier(.22,1,.36,1) 80ms forwards; }
+.error-icon { transform-origin: center; animation: alert-enter 260ms cubic-bezier(.22,1,.36,1) both; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes check-draw { to { stroke-dashoffset: 0; } }
+@keyframes alert-enter { from { opacity: 0; transform: scale(.86); } to { opacity: 1; transform: scale(1); } }
 .text-control { padding: 6px 4px; color: #b8c7eb; border: 0; border-radius: 6px; background: transparent; font-size: 10px; }
 .text-control:hover { color: #fff; background: #17191f; }
 .text-control:disabled { cursor: default; opacity: .55; }
+.task-detail-motion { grid-column: 1 / -1; overflow: hidden; }
 .task-detail-list {
   display: grid;
   grid-column: 1 / -1;
@@ -116,10 +153,21 @@ button { color: inherit; cursor: pointer; }
   font-size: 11px;
   line-height: 1.5;
 }
-.progress-track { grid-column: 1 / -1; height: 3px; overflow: hidden; border-radius: 10px; background: #343d4e; }
-.progress-indicator { display: block; width: 32%; height: 100%; border-radius: inherit; background: #a5bdff; animation: progress-sweep 1.45s cubic-bezier(.55, .05, .45, .95) infinite; }
-@keyframes progress-sweep { from { transform: translateX(-110%); } to { transform: translateX(420%); } }
-.state-error .progress-track { display: none; }
+.progress-shell { grid-column: 1 / -1; display: grid; grid-template-rows: 0fr; overflow: hidden; opacity: 0; transform: translateY(-4px); transition: grid-template-rows 180ms ease, opacity 180ms ease, transform 180ms ease; }
+.progress-shell.expanded { grid-template-rows: 1fr; opacity: 1; transform: translateY(0); }
+.progress-clip { min-height: 0; overflow: hidden; }
+.progress-track { height: 3px; overflow: hidden; border-radius: 10px; background: #343d4e; }
+.progress-indicator { display: block; height: 100%; border-radius: inherit; background: #a5bdff; transition: width 400ms cubic-bezier(.2,.8,.2,1); }
+.state-error .progress-indicator { background: #e59a9d; }
+.state-done .progress-indicator { background: #81cfaa; }
+.step-list { display: grid; gap: 13px; padding-top: 14px; border-top: 1px solid #ffffff18; }
+.step { display: flex; align-items: center; gap: 11px; min-height: 20px; color: #c2cad7; font-size: 12px; }
+.step strong { font-weight: 580; }
+.step-icon { display: grid; width: 19px; height: 19px; flex: 0 0 auto; place-items: center; color: #748097; }
+.step-icon.ok { color: #81cfaa; }
+.step-icon.current { color: #9bb8fa; }
+.step-status { margin-left: auto; color: #81cfaa; font-size: 10px; }
+.current-status { color: #9bb8fa; }
 .task-detail-list p { margin: 0; }
 .task-detail-list .task-detail-list { margin: 0; padding: 0; border: 0; }
 .mini-label { color: #8996a9; font-size: 9px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase; }
@@ -179,11 +227,31 @@ button { color: inherit; cursor: pointer; }
 .preview-state.selected { color: #315da9; border-color: #9bb7ed; background: #e4ecff; font-weight: 700; }
 .preview-controls-note { margin: 11px 0 0; color: #7c8aa0; font-size: 9px; }
 
+.voice-shell { grid-template-columns: 36px minmax(0, 1fr) auto; }
+.voice-live-row { display: flex; align-items: center; gap: 8px; }
+.voice-live-row .wave { flex: 0 0 auto; }
+.voice-live-row .status-sub { color: #9aa6b9; }
+.voice-copy { display: grid; min-width: 0; gap: 4px; }
+.mic-active { color: #fff; background: #c26771; }
+.wave { display: flex; height: 19px; align-items: center; gap: 3px; }
+.wave i { display: block; width: 3px; height: 6px; border-radius: 3px; background: #a3bdff; animation: wave 1s infinite ease-in-out; }
+.wave i:nth-child(2n) { animation-delay: .13s; }
+.wave i:nth-child(3n) { animation-delay: .27s; }
+.wave i:nth-child(5n) { animation-delay: .43s; }
+@keyframes wave { 0%,100% { height: 5px; opacity: .5; } 50% { height: 18px; opacity: 1; } }
+.transcribing-shell { grid-template-columns: 36px minmax(0, 1fr) auto; min-height: 82px; }
+.transcription-copy { display: grid; min-width: 0; gap: 5px; }
+.transcript-line { min-height: 30px; color: #cbd5e7; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.transcript-caret { display: inline-block; width: 1px; height: 12px; margin-left: 2px; vertical-align: -2px; background: #a3bdff; animation: caret-blink .8s steps(2,start) infinite; }
+@keyframes caret-blink { to { visibility: hidden; } }
+
 button:focus-visible { outline: 2px solid #92b5ff; outline-offset: 2px; }
 @media (max-width: 520px) {
   .island, .island.expanded { width: 100%; }
+  .tauri-root .island.state-composer, .tauri-root .island.state-working, .tauri-root .island.state-done, .tauri-root .island.state-cancelled, .tauri-root .island.state-error, .tauri-root .island.state-attention, .tauri-root .island.state-settings, .tauri-root .island.expanded { width: 100%; }
   .preview-controls { right: 12px; bottom: 12px; left: 12px; width: auto; }
 }
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  .island.is-hidden { transition-delay: 0s; }
 }

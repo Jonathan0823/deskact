@@ -18,6 +18,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(ShortcutState::default())
         .manage(window_behavior::PreviousForegroundWindow::default())
+        .manage(window_behavior::WindowMorphGeneration::default())
         .manage(TaskHub::default())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -36,6 +37,7 @@ pub fn run() {
             tasks::submit_task,
             tasks::stop_task,
             yield_focus,
+            morph_island_window,
             quit_application,
             dismiss_island
         ])
@@ -72,6 +74,16 @@ fn update_global_shortcut(
 #[tauri::command]
 fn yield_focus(app: tauri::AppHandle) {
     window_behavior::yield_focus(&app);
+}
+
+#[tauri::command]
+async fn morph_island_window(
+    app: tauri::AppHandle,
+    width: f64,
+    height: f64,
+    reduced_motion: bool,
+) -> Result<(), String> {
+    window_behavior::morph_window(&app, width, height, reduced_motion).await
 }
 
 #[tauri::command]

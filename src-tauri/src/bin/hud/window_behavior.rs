@@ -1,6 +1,15 @@
-use std::sync::Mutex;
+use std::{
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
+
+#[derive(Default)]
+pub struct WindowMorphGeneration(AtomicU64);
 
 pub const INVOKED_EVENT: &str = "deskact://invoked";
 pub const SETTINGS_EVENT: &str = "deskact://open-settings";
@@ -51,6 +60,96 @@ fn open_window(app: &AppHandle, event: &str) {
 
 pub fn yield_focus(app: &AppHandle) {
     restore_foreground(app);
+}
+
+pub async fn morph_window(
+    app: &AppHandle,
+    width: f64,
+    height: f64,
+    reduced_motion: bool,
+) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "DeskAct's window is unavailable".to_owned())?;
+    let generation = app
+        .state::<WindowMorphGeneration>()
+        .0
+        .fetch_add(1, Ordering::Relaxed)
+        + 1;
+    let target_width = width.clamp(280.0, 560.0);
+    let target_height = height.clamp(48.0, 340.0);
+    let scale = window
+        .scale_factor()
+        .map_err(|_| "Could not read DeskAct's display scale".to_owned())?;
+    let target = PhysicalSize::new(
+        (target_width * scale).round() as u32,
+        (target_height * scale).round() as u32,
+    );
+    let start = window
+        .inner_size()
+        .map_err(|_| "Could not read DeskAct's current size".to_owned())?;
+    let position = window
+        .outer_position()
+        .map_err(|_| "Could not read DeskAct's current position".to_owned())?;
+    let center_x = position.x + (start.width as i32 / 2);
+    let top = position.y;
+    if start == target {
+        return Ok(());
+    }
+    if reduced_motion {
+        window
+            .set_size(target)
+            .map_err(|_| "Could not resize DeskAct".to_owned())?;
+        window
+            .set_position(PhysicalPosition::new(
+                center_x - target.width as i32 / 2,
+                top,
+            ))
+            .map_err(|_| "Could not anchor DeskAct after resize".to_owned())?;
+        return Ok(());
+    }
+
+    const FRAMES: u32 = 14;
+    for frame in 1..=FRAMES {
+        if app
+            .state::<WindowMorphGeneration>()
+            .0
+            .load(Ordering::Relaxed)
+            != generation
+        {
+            return Ok(());
+        }
+        let progress = frame as f64 / FRAMES as f64;
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        let width = (start.width as f64 + (target.width as f64 - start.width as f64) * eased)
+            .round() as u32;
+        let height = (start.height as f64 + (target.height as f64 - start.height as f64) * eased)
+            .round() as u32;
+        window
+            .set_size(PhysicalSize::new(width, height))
+            .map_err(|_| "Could not morph DeskAct's size".to_owned())?;
+        window
+            .set_position(PhysicalPosition::new(center_x - width as i32 / 2, top))
+            .map_err(|_| "Could not anchor DeskAct during resize".to_owned())?;
+        tokio::time::sleep(Duration::from_millis(16)).await;
+    }
+    if app
+        .state::<WindowMorphGeneration>()
+        .0
+        .load(Ordering::Relaxed)
+        == generation
+    {
+        window
+            .set_size(target)
+            .map_err(|_| "Could not finish resizing DeskAct".to_owned())?;
+        window
+            .set_position(PhysicalPosition::new(
+                center_x - target.width as i32 / 2,
+                top,
+            ))
+            .map_err(|_| "Could not anchor DeskAct after resize".to_owned())?;
+    }
+    Ok(())
 }
 
 pub fn dismiss(app: &AppHandle) -> Result<(), String> {
