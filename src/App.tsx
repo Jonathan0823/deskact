@@ -1,17 +1,17 @@
-import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Check, LoaderCircle, Mic, Play, TriangleAlert, X } from "lucide-react";
+import { Check, LoaderCircle, Mic, Send, Sparkles, TriangleAlert, X } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 type PrototypeState = "composer" | "working" | "attention" | "settings" | "voice";
-type PreviewState = "hidden" | "command" | "voice" | "working" | "details" | "approval" | "destructive" | "removed" | "destroyed" | "done" | "error" | "cancelled";
+type PreviewState = "hidden" | "command" | "voice" | "working" | "settings" | "approval" | "destructive" | "removed" | "destroyed" | "done" | "error" | "cancelled";
 const previewStates: Array<{ id: PreviewState; label: string }> = [
   { id: "hidden", label: "Hidden" },
   { id: "command", label: "Command" },
   { id: "voice", label: "Voice" },
   { id: "working", label: "Working" },
-  { id: "details", label: "Details" },
+  { id: "settings", label: "Settings" },
   { id: "approval", label: "Remove" },
   { id: "destructive", label: "Destruction" },
   { id: "done", label: "Done" },
@@ -42,11 +42,29 @@ type TaskSnapshot = {
   cancellation_requested: boolean;
   progress?: TaskProgress | null;
 };
+type ThemeMode = "light" | "dark" | "system";
+type AppearanceSettings = { theme: ThemeMode; opacity: number; blur: number };
 type ShortcutStatus = {
   accelerator: string;
   registered: boolean;
   error: string | null;
 };
+
+const appearanceStorageKey = "deskact-appearance-v1";
+const defaultAppearance: AppearanceSettings = { theme: "light", opacity: 48, blur: 32 };
+function readAppearance(): AppearanceSettings {
+  try {
+    const saved = JSON.parse(localStorage.getItem(appearanceStorageKey) ?? "null") as Partial<AppearanceSettings> | null;
+    if (!saved) return defaultAppearance;
+    return {
+      theme: saved.theme === "dark" || saved.theme === "system" ? saved.theme : "light",
+      opacity: typeof saved.opacity === "number" ? Math.max(18, Math.min(85, saved.opacity)) : defaultAppearance.opacity,
+      blur: typeof saved.blur === "number" ? Math.max(0, Math.min(50, saved.blur)) : defaultAppearance.blur,
+    };
+  } catch {
+    return defaultAppearance;
+  }
+}
 
 const defaultShortcut: ShortcutStatus = {
   accelerator: "Ctrl+Shift+Space",
@@ -70,6 +88,7 @@ function previewView(state: PreviewState): PrototypeState | "hidden" {
     case "approval":
     case "destructive": return "attention";
     case "voice": return "voice";
+    case "settings": return "settings";
     default: return "working";
   }
 }
@@ -88,7 +107,7 @@ function phaseLabel(phase: TaskPhase) {
 const demoSteps = ["Opening Spotify", "Finding Liked Songs", "Starting playback"];
 const demoVoiceCommand = "Open Spotify and play my Liked Songs";
 function previewTask(state: PreviewState, step: number): TaskSnapshot | null {
-  const phase: TaskPhase | null = state === "working" || state === "details" ? "running"
+  const phase: TaskPhase | null = state === "working" ? "running"
     : state === "done" || state === "removed" || state === "destroyed" ? "completed"
       : state === "error" ? "failed"
         : state === "cancelled" ? "cancelled"
@@ -121,13 +140,14 @@ export default function App() {
   const [previewStep, setPreviewStep] = useState(0);
   const [streamedTranscript, setStreamedTranscript] = useState("");
   const [islandVisible, setIslandVisible] = useState(() => !isTauri());
+  const [appearance, setAppearance] = useState<AppearanceSettings>(readAppearance);
+  const [systemPrefersDark, setSystemPrefersDark] = useState(false);
   const [shortcut, setShortcut] = useState<ShortcutStatus>(defaultShortcut);
   const [shortcutInput, setShortcutInput] = useState(defaultShortcut.accelerator);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [request, setRequest] = useState("");
   const [task, setTask] = useState<TaskSnapshot | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [quitRequested, setQuitRequested] = useState(false);
   const requestInput = useRef<HTMLInputElement>(null);
   const islandRef = useRef<HTMLElement>(null);
@@ -135,9 +155,10 @@ export default function App() {
   const hideTimer = useRef<number | null>(null);
   const browserPreview = import.meta.env.DEV && !isTauri();
   const prefersReducedMotion = useReducedMotion();
+  const resolvedTheme = appearance.theme === "system" ? (systemPrefersDark ? "dark" : "light") : appearance.theme;
+  const shellStyle = { "--glass-opacity": appearance.opacity / 100, "--glass-blur": `${appearance.blur}px` } as CSSProperties;
   const displayedState = browserPreview ? previewView(previewState) : islandVisible ? state : "hidden";
   const displayedTask = browserPreview ? previewTask(previewState, previewStep) : task;
-  const displayedDetailsExpanded = browserPreview ? previewState === "details" : detailsExpanded;
   const lastPreviewState = useRef<PreviewState>("command");
   if (browserPreview && previewState !== "hidden") lastPreviewState.current = previewState;
   const contentState = browserPreview && previewState === "hidden"
@@ -146,9 +167,6 @@ export default function App() {
   const contentTask = browserPreview && previewState === "hidden"
     ? previewTask(lastPreviewState.current, previewStep)
     : displayedTask;
-  const contentDetailsExpanded = browserPreview && previewState === "hidden"
-    ? lastPreviewState.current === "details"
-    : displayedDetailsExpanded;
   const destructiveApproval = browserPreview && (previewState === "destructive" || (previewState === "hidden" && lastPreviewState.current === "destructive"));
 
   function selectPreviewState(next: PreviewState) {
@@ -156,6 +174,19 @@ export default function App() {
     if (next === "voice") setStreamedTranscript("");
     setPreviewState(next);
   }
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => setSystemPrefersDark(media.matches);
+    update();
+    media.addEventListener?.("change", update);
+    return () => media.removeEventListener?.("change", update);
+  }, []);
+
+  useEffect(() => {
+    try { localStorage.setItem(appearanceStorageKey, JSON.stringify(appearance)); } catch { /* Appearance remains available for this session. */ }
+  }, [appearance]);
 
   function dismissIsland() {
     if (browserPreview) {
@@ -175,13 +206,13 @@ export default function App() {
     if (!isTauri()) return;
 
     let width: number;
-    if (quitRequested || state === "attention") width = 490;
-    else if (state === "composer") width = 506;
-    else if (state === "settings") width = 520;
-    else if (state === "voice") width = 360;
-    else if (detailsExpanded) width = 502;
-    else if (task?.phase === "partial" || task?.phase === "failed") width = 366;
-    else width = task?.phase === "completed" || task?.phase === "cancelled" ? 296 : 352;
+    if (quitRequested) width = 490;
+    else if (state === "attention") width = 520;
+    else if (state === "composer") width = 720;
+    else if (state === "settings") width = 560;
+    else if (state === "voice") width = 426;
+    else if (task?.phase === "partial" || task?.phase === "failed") width = 491;
+    else width = task?.phase === "completed" || task?.phase === "cancelled" ? 360 : 491;
     const height = Math.ceil(islandRef.current?.scrollHeight ?? 88);
 
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -190,7 +221,7 @@ export default function App() {
       height,
       reducedMotion,
     }).catch(() => {});
-  }, [state, quitRequested, detailsExpanded, task?.phase]);
+  }, [state, quitRequested, task?.phase]);
 
   useEffect(() => {
     if (!browserPreview || previewState !== "working") return;
@@ -355,7 +386,6 @@ export default function App() {
     const submitted = request.trim();
     if (!submitted || !isTauri()) return;
     setSubmitError(null);
-    setDetailsExpanded(false);
     try {
       const started = await invoke<TaskSnapshot>("submit_task", { request: submitted });
       acceptTaskSnapshot(started);
@@ -379,8 +409,8 @@ export default function App() {
     : contentState;
 
   return (
-    <div className={browserPreview ? "web-preview" : "tauri-root"}>
-      <main ref={islandRef} className={`island state-${visualState}${contentDetailsExpanded ? " expanded" : ""}${quitRequested ? " quit-confirming" : ""}${displayedState === "hidden" ? " is-hidden" : ""}`} aria-label="DeskAct Adaptive Island" aria-hidden={displayedState === "hidden"} inert={displayedState === "hidden"}>
+    <div className={`app-shell ${browserPreview ? "web-preview" : "tauri-root"} theme-${resolvedTheme}`} style={shellStyle}>
+      <main ref={islandRef} className={`island state-${visualState}${quitRequested ? " quit-confirming" : ""}${displayedState === "hidden" ? " is-hidden" : ""}`} aria-label="DeskAct Adaptive Island" aria-hidden={displayedState === "hidden"} inert={displayedState === "hidden"}>
       <AnimatePresence mode="popLayout" initial={false}>
       <motion.div
         key={contentState}
@@ -396,6 +426,8 @@ export default function App() {
             <form onSubmit={(event) => void submitRequest(event)}>
               <label className="sr-only" htmlFor="request">What would you like DeskAct to do?</label>
               <div className="input-row">
+                <Sparkles className="brand-spark" size={34} aria-hidden="true" />
+                <span className="divider" aria-hidden="true" />
                 <input
                   ref={requestInput}
                   id="request"
@@ -406,15 +438,9 @@ export default function App() {
                   autoComplete="off"
                   spellCheck={false}
                 />
-                <button className="play-button" type="submit" aria-label="Run command" disabled={!request.trim()}>
-                  <Play size={15} fill="currentColor" strokeWidth={1.5} aria-hidden="true" />
+                <button className="send-button" type="submit" aria-label="Run command" disabled={!request.trim()}>
+                  <Send size={24} aria-hidden="true" />
                 </button>
-              </div>
-              <div className="composer-hints">
-                <div className="composer-voice-entry">
-                  {browserPreview && <button className="voice-button" type="button" aria-label="Voice input" onClick={() => selectPreviewState("voice")}><Mic size={15} aria-hidden="true" /></button>}
-                </div>
-                <div className="composer-key-hints"><span>Enter to run</span><span>Esc to dismiss</span></div>
               </div>
             </form>
             {submitError && <p className="error-message" role="alert">{submitError}</p>}
@@ -432,7 +458,7 @@ export default function App() {
             <StreamingText text={streamedTranscript} />
             <span className="sr-only" role="status">Listening for voice input.</span>
           </div>
-          <button className="text-control" type="button" onClick={() => selectPreviewState("command")}>Cancel</button>
+          <button className="glass-icon" type="button" aria-label="Cancel voice input" onClick={() => selectPreviewState("command")}><X size={22} aria-hidden="true" /></button>
         </section>
       )}
 
@@ -440,8 +466,6 @@ export default function App() {
         contentTask ? (
           <TaskStatus
             task={contentTask}
-            detailsExpanded={contentDetailsExpanded}
-            onToggleDetails={() => browserPreview ? selectPreviewState(contentDetailsExpanded ? "working" : "details") : setDetailsExpanded((value) => !value)}
             onStop={() => browserPreview ? selectPreviewState("cancelled") : void stopTask()}
           />
         ) : (
@@ -485,10 +509,17 @@ export default function App() {
         </section>
       )}
 
-      {!browserPreview && contentState === "settings" && (
+      {contentState === "settings" && (
         <section className="surface settings-surface" aria-labelledby="settings-title">
-          <h1 id="settings-title">Settings</h1>
-          <p className="settings-copy">Global shortcut opens DeskAct from another application. Tray access remains available if registration fails.</p>
+          <h1 id="settings-title">Appearance</h1>
+          <div className="theme-tabs" role="group" aria-label="Color theme">
+            {(["light", "dark", "system"] as const).map((theme) => <button key={theme} type="button" aria-pressed={appearance.theme === theme} onClick={() => setAppearance((value) => ({ ...value, theme }))}>{theme[0].toUpperCase() + theme.slice(1)}</button>)}
+          </div>
+          <div className="range-setting"><label htmlFor="glass-opacity">Glass opacity</label><output>{appearance.opacity}%</output><input id="glass-opacity" type="range" min="18" max="85" value={appearance.opacity} onChange={(event) => setAppearance((value) => ({ ...value, opacity: Number(event.target.value) }))} /></div>
+          <div className="range-setting"><label htmlFor="glass-blur">Backdrop blur</label><output>{appearance.blur}px</output><input id="glass-blur" type="range" min="0" max="50" step="2" value={appearance.blur} onChange={(event) => setAppearance((value) => ({ ...value, blur: Number(event.target.value) }))} /></div>
+          {!browserPreview && <>
+          <h2 className="settings-subheading">Global shortcut</h2>
+          <p className="settings-copy">Open DeskAct from another application.</p>
           <label htmlFor="shortcut">Global shortcut</label>
           <input
             id="shortcut"
@@ -501,9 +532,10 @@ export default function App() {
             {shortcut.registered ? `Registered: ${shortcut.accelerator}` : "Shortcut is not registered; use the tray to reopen DeskAct."}
           </p>
           {(shortcut.error || saveError) && <p className="error-message" role="alert">{saveError ?? shortcut.error}</p>}
+          </>}
           <div className="button-row">
-            <button className="quiet-button" type="button" onClick={() => setState("composer")}>Back</button>
-            <button className="primary-button" type="button" onClick={() => void saveShortcut()}>Save shortcut</button>
+            <button className="quiet-button" type="button" onClick={() => browserPreview ? selectPreviewState("command") : setState("composer")}>Back</button>
+            {!browserPreview && <button className="primary-button" type="button" onClick={() => void saveShortcut()}>Save shortcut</button>}
           </div>
         </section>
       )}
@@ -536,92 +568,26 @@ function StreamingText({ text }: { text: string }) {
   );
 }
 
-export function TaskStatus({
-  task,
-  detailsExpanded,
-  onToggleDetails,
-  onStop,
-}: {
-  task: TaskSnapshot;
-  detailsExpanded: boolean;
-  onToggleDetails: () => void;
-  onStop: () => void;
-}) {
-  const reducedMotion = useReducedMotion();
+export function TaskStatus({ task, onStop }: { task: TaskSnapshot; onStop: () => void }) {
   const active = isActiveTask(task);
   const complete = task.phase === "completed";
   const failed = task.phase === "partial" || task.phase === "failed";
-  const title = complete ? "Task completed" : failed ? "Action needs attention" : task.phase === "cancelled" ? "Task stopped" : task.message || phaseLabel(task.phase);
-  const subtitle = failed
-    ? task.message || phaseLabel(task.phase)
-    : complete ? task.message || phaseLabel(task.phase)
-      : task.progress ? `${task.progress.app_name} · Step ${task.progress.current_step} of ${task.progress.total_steps}`
-        : phaseLabel(task.phase);
-  const iconClass = complete ? "compact-icon success" : failed ? "compact-icon danger" : task.phase === "cancelled" ? "compact-icon muted-icon" : "compact-icon";
+  const label = complete ? task.message || "Task completed"
+    : failed ? task.message || "Action needs attention"
+      : task.phase === "cancelled" ? "Task cancelled"
+        : task.message || phaseLabel(task.phase);
 
   return (
-    <section className={`shell compact-shell with-icon${active ? " has-stop" : ""}${detailsExpanded ? " details-open" : ""}`} aria-label="Task status">
-      <div className={iconClass} aria-hidden="true">
-        {active ? <LoaderCircle className="loading-icon" size={17} />
-          : complete ? <Check className="completed-icon" size={18} />
-            : failed ? <TriangleAlert className="error-icon" size={18} />
-              : <X size={16} />}
-      </div>
-      <button className="status-trigger grow" type="button" aria-expanded={detailsExpanded} onClick={onToggleDetails}>
-        <span className="status-title">{title}</span>
-        <span className="status-sub">{subtitle}</span>
-      </button>
-      {active && (
-        <button className="text-control stop-control" type="button" disabled={task.cancellation_requested} onClick={onStop}>
-          {task.cancellation_requested ? "Stopping" : "Stop"}
-        </button>
-      )}
-      <button className="text-control detail-control" type="button" aria-expanded={detailsExpanded} onClick={onToggleDetails}>
-        {detailsExpanded ? "Hide" : "Details"}
-      </button>
-      {task.progress && <ProgressTrack progress={task.progress} active={active && !detailsExpanded} />}
-      <AnimatePresence initial={false}>
-        {detailsExpanded && (
-          <motion.div className="task-detail-motion" initial={reducedMotion ? { opacity: 0, height: 0 } : { opacity: 0, height: 0, y: 4 }} animate={{ opacity: 1, height: "auto", y: 0 }} exit={reducedMotion ? { opacity: 0, height: 0 } : { opacity: 0, height: 0, y: 2 }} transition={{ duration: reducedMotion ? 0.01 : 0.2, ease: [0.22, 1, 0.36, 1] }}>
-            <div className="task-detail-list">
-              {task.report
-                ? <TaskReportDetails report={task.report} />
-                : <><span className="mini-label">Task details</span><p>{task.message || "DeskAct is checking the request and supported target."}</p></>}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+    <section className="shell task-shell" aria-label="Task status">
+      <Sparkles className="brand-spark" size={32} aria-hidden="true" />
+      <span className="divider" aria-hidden="true" />
+      <span className="task-label">{label}</span>
+      {active ? <span className="loader" aria-label="Working" />
+        : complete ? <Check className="done-icon" size={28} aria-label="Completed" />
+          : failed ? <TriangleAlert className="error-icon" size={26} aria-label="Needs attention" />
+            : null}
+      {active && <button className="glass-icon" type="button" aria-label={task.cancellation_requested ? "Stopping task" : "Cancel task"} disabled={task.cancellation_requested} onClick={onStop}><X size={22} aria-hidden="true" /></button>}
     </section>
-  );
-}
-
-function ProgressTrack({ progress, active }: { progress: TaskProgress; active: boolean }) {
-  const [present, setPresent] = useState(true);
-  const [expanded, setExpanded] = useState(false);
-  const percent = Math.round((progress.current_step / Math.max(1, progress.total_steps)) * 100);
-
-  useEffect(() => {
-    setPresent(true);
-    const reveal = window.requestAnimationFrame(() => setExpanded(true));
-    if (active) return () => window.cancelAnimationFrame(reveal);
-    const collapse = window.setTimeout(() => setExpanded(false), 700);
-    const remove = window.setTimeout(() => setPresent(false), 900);
-    return () => {
-      window.cancelAnimationFrame(reveal);
-      window.clearTimeout(collapse);
-      window.clearTimeout(remove);
-    };
-  }, [active, progress.current_step, progress.total_steps]);
-
-  if (!present) return null;
-  return (
-    <div className={`progress-shell${expanded ? " expanded" : ""}`}>
-      <div className="progress-clip">
-        <div className="progress-track" role="progressbar" aria-label="Task progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-valuetext={`Step ${progress.current_step} of ${progress.total_steps}`}>
-          <span className="progress-indicator" style={{ width: `${percent}%` }} />
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -639,17 +605,5 @@ function PreviewControls({ selected, onSelect }: { selected: PreviewState; onSel
         ))}
       </div>
     </aside>
-  );
-}
-
-function TaskReportDetails({ report }: { report: TaskReport }) {
-  return (
-    <div className="task-detail-list">
-      <strong>{report.status === "completed" ? "Verified results" : "Outcome details"}</strong>
-      {report.evidence.map((item) => <p key={item.app_name}>{item.app_name}: open in a uniquely matched accessible window with a fresh snapshot.</p>)}
-      {report.achieved_postconditions.map((item) => <p key={item}>{item}</p>)}
-      {report.unresolved_steps.map((item) => <p className="warning-copy" key={item}>{item}</p>)}
-      {!report.evidence.length && !report.unresolved_steps.length && <p>{report.summary}</p>}
-    </div>
   );
 }

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App, { TaskStatus } from "./App";
@@ -46,9 +46,17 @@ describe("Adaptive Island", () => {
 
     await user.click(controls.getByRole("button", { name: "Working" }));
     expect(screen.getByText("Opening Spotify")).toBeTruthy();
-    await user.click(controls.getByRole("button", { name: "Details" }));
-    expect(screen.getByText("Task details")).toBeTruthy();
-    expect(within(screen.getByRole("main", { name: "DeskAct Adaptive Island" })).queryByText(/demo|fixture|preview only/i)).toBeNull();
+    await user.click(controls.getByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("group", { name: "Color theme" })).toBeTruthy();
+    const darkMode = screen.getByRole("button", { name: "Dark" });
+    await user.click(darkMode);
+    expect(document.querySelector(".app-shell")?.classList.contains("theme-dark")).toBe(true);
+    const opacity = screen.getByLabelText("Glass opacity");
+    expect(screen.getByLabelText("Backdrop blur")).toBeTruthy();
+    fireEvent.change(opacity, { target: { value: "62" } });
+    expect((opacity as HTMLInputElement).value).toBe("62");
+    expect(document.querySelector(".app-shell")?.getAttribute("style")).toContain("--glass-opacity: 0.62");
+    await user.click(screen.getByRole("button", { name: "Back" }));
     await user.click(controls.getByRole("button", { name: "Hidden" }));
     expect(screen.queryByRole("main", { name: "DeskAct Adaptive Island" })).toBeNull();
     expect(controls.getByRole("button", { name: "Hidden" })).toBeTruthy();
@@ -117,18 +125,15 @@ describe("Adaptive Island", () => {
     expect(screen.queryByRole("button", { name: "Use text" })).toBeNull();
   });
 
-  it("presents task status as a compact island with text controls", async () => {
+  it("presents task status as a simple glass pill with cancellation", async () => {
     const user = userEvent.setup();
-    const onToggleDetails = vi.fn();
     const onStop = vi.fn();
-    render(<TaskStatus task={activeTask} detailsExpanded={false} onToggleDetails={onToggleDetails} onStop={onStop} />);
+    render(<TaskStatus task={activeTask} onStop={onStop} />);
 
-    expect(screen.getByRole("region", { name: "Task status" }).className).toContain("compact-shell");
+    expect(screen.getByRole("region", { name: "Task status" }).className).toContain("task-shell");
     expect(screen.getByText("Opening Spotify")).toBeTruthy();
-    expect(screen.getByRole("progressbar", { name: "Task progress" })).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Stop" }));
+    expect(screen.queryByRole("progressbar", { name: "Task progress" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Cancel task" }));
     expect(onStop).toHaveBeenCalledOnce();
-    await user.click(screen.getByRole("button", { name: "Details" }));
-    expect(onToggleDetails).toHaveBeenCalledOnce();
   });
 });
