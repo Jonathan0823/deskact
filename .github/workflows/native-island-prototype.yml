@@ -1,0 +1,29 @@
+name: Native Island Window Probe
+
+on:
+  push:
+    branches: [prototype/native-windows-island]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-probe:
+    name: Build native Windows probe (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check formatting
+        run: cargo fmt --manifest-path prototypes/native-island/Cargo.toml -- --check
+      - name: Lint probe
+        run: cargo clippy --manifest-path prototypes/native-island/Cargo.toml --target x86_64-pc-windows-msvc --locked -- -D warnings
+      - name: Build probe
+        run: cargo build --manifest-path prototypes/native-island/Cargo.toml --release --locked --target x86_64-pc-windows-msvc
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deskact-native-island-probe-windows-x64
+          path: prototypes/native-island/target/x86_64-pc-windows-msvc/release/deskact_native_island_probe.exe
+          if-no-files-found: error
+          retention-days: 14
