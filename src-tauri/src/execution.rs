@@ -62,6 +62,7 @@ pub fn validate_open_app_request(
     let normalized = format!(" {} ", app_request.to_lowercase());
     let compound_markers = [
         " and ",
+        " or ",
         " then ",
         " after ",
         " before ",
@@ -87,7 +88,7 @@ pub fn validate_open_app_request(
     }
     let secondary_actions = [
         "type", "enter", "save", "click", "press", "write", "delete", "move", "copy", "paste",
-        "select", "play",
+        "select", "play", "open", "launch",
     ];
     if app_request
         .split_whitespace()
@@ -352,21 +353,32 @@ mod tests {
     /// Reject shortcut arguments during whole-plan validation, before any resolver invocation.
     #[test]
     fn shortcut_arguments_are_rejected_before_resolution() {
-        let entry = AppCatalogEntry {
-            id: "calculator-id".into(),
-            name: "Calculator".into(),
-            target: "C:\\Windows\\System32\\calc.exe".into(),
-            arguments: "--unsupported".into(),
+        let first = AppCatalogEntry {
+            id: "first-id".into(),
+            name: "First App".into(),
+            target: "C:\\Windows\\First.exe".into(),
+            arguments: String::new(),
             working_directory: String::new(),
             source: AppCatalogSource::UserConfigured,
             aliases: Vec::new(),
         };
-        let result = execute_action_plan(
-            &open_app_plan(&entry),
-            std::slice::from_ref(&entry),
-            "registered_workflow",
-            |_| panic!("invalid shortcut must not reach native resolution"),
-        );
+        let mut second = first.clone();
+        second.id = "second-id".into();
+        second.name = "Second App".into();
+        second.target = "C:\\Windows\\Second.exe".into();
+        second.arguments = "--unsupported".into();
+        let plan = ActionPlan {
+            version: 1,
+            summary: "Open both apps".into(),
+            steps: vec![
+                open_app_plan(&first).steps[0].clone(),
+                open_app_plan(&second).steps[0].clone(),
+            ],
+        };
+        let catalog = [first, second];
+        let result = execute_action_plan(&plan, &catalog, "registered_workflow", |_| {
+            panic!("invalid later shortcut must not allow an earlier launch")
+        });
         assert!(
             result
                 .unwrap_err()
