@@ -72,6 +72,17 @@ cargo run --manifest-path src-tauri/Cargo.toml -- notepad-acceptance
 cargo run --manifest-path src-tauri/Cargo.toml -- file-explorer-acceptance
 cargo run --manifest-path src-tauri/Cargo.toml -- calculator-acceptance
 cargo run --manifest-path src-tauri/Cargo.toml -- vlc-acceptance
+# Deterministic task-recovery policy simulations (perform no native actions):
+cargo run --manifest-path src-tauri/Cargo.toml -- task simulate --scenario unknown-delivery
+cargo run --manifest-path src-tauri/Cargo.toml -- task simulate --scenario unknown-delivery-achieved
+cargo run --manifest-path src-tauri/Cargo.toml -- task simulate --scenario unknown-delivery-safe-retry
+cargo run --manifest-path src-tauri/Cargo.toml -- task simulate --scenario stale-reference
+cargo run --manifest-path src-tauri/Cargo.toml -- task simulate --scenario incomplete-observation
+cargo run --manifest-path src-tauri/Cargo.toml -- task simulate --scenario permission-denied
+cargo run --manifest-path src-tauri/Cargo.toml -- task simulate --scenario busy-request
+cargo run --manifest-path src-tauri/Cargo.toml -- task simulate --scenario cancel-in-flight
+cargo run --manifest-path src-tauri/Cargo.toml -- task simulate --scenario ui-interference
+cargo run --manifest-path src-tauri/Cargo.toml -- task simulate --scenario ui-interference-unclear
 # Optional short smoke check (does not assess the 19/20 gate):
 cargo run --manifest-path src-tauri/Cargo.toml -- notepad-acceptance --runs 1
 ```

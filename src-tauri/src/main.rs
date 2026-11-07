@@ -11,8 +11,8 @@ use deskact_core::{
     DeskActError, NativeTargetResolution, VerifiedNativeCli, add_user_app_entry,
     edit_user_app_entry, load_app_catalog, native_inventory, preflight, prepare_app_selection,
     request_action_plan, resolve_native_target, run_calculator_acceptance,
-    run_file_explorer_acceptance, run_notepad_acceptance, run_vlc_acceptance, test_llm_connection,
-    validate_action_plan_json,
+    run_file_explorer_acceptance, run_notepad_acceptance, run_vlc_acceptance,
+    simulate_task_scenario, test_llm_connection, validate_action_plan_json,
 };
 
 /// Run the developer-only native preflight, inventory, target-resolution, or acceptance command.
@@ -37,6 +37,10 @@ fn main() -> ExitCode {
         Some("llm") => {
             let arguments: Vec<_> = env::args().skip(2).collect();
             run_llm_command(&arguments)
+        }
+        Some("task") => {
+            let arguments: Vec<_> = env::args().skip(2).collect();
+            run_task_command(&arguments)
         }
         Some("resolve") => {
             let mut arguments = env::args().skip(2);
@@ -145,7 +149,7 @@ fn main() -> ExitCode {
 
         _ => {
             eprintln!(
-                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|llm <test|plan <request>|validate-plan>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
+                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|llm <test|plan <request>|validate-plan>|task simulate --scenario <name>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
             );
             ExitCode::from(2)
         }
@@ -231,6 +235,32 @@ fn run_app_catalog_command(arguments: &[String]) -> ExitCode {
         }
         Err(error) => {
             eprintln!("App catalog operation failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run a deterministic task-recovery simulation through the developer harness.
+fn run_task_command(arguments: &[String]) -> ExitCode {
+    let [command, flag, scenario] = arguments else {
+        eprintln!("Usage: deskact-dev task simulate --scenario <name>");
+        return ExitCode::from(2);
+    };
+    if command != "simulate" || flag != "--scenario" {
+        eprintln!("Usage: deskact-dev task simulate --scenario <name>");
+        return ExitCode::from(2);
+    }
+
+    match simulate_task_scenario(scenario).and_then(|report| {
+        serde_json::to_string_pretty(&report)
+            .map_err(|_| DeskActError::new("Could not serialize task simulation report".into()))
+    }) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Task simulation failed: {error}");
             ExitCode::from(1)
         }
     }
