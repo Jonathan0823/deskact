@@ -23,6 +23,7 @@ describe("Adaptive Island", () => {
 
     expect(screen.getByRole("textbox", { name: "What would you like DeskAct to do?" })).toBeTruthy();
     expect(screen.getByRole("main", { name: "DeskAct Adaptive Island" }).className).toContain("state-composer");
+    expect(screen.getByRole("main", { name: "DeskAct Adaptive Island" }).querySelector(".brand-spark")).toBeNull();
     expect(screen.queryByText("DeskAct", { selector: ".title" })).toBeNull();
     expect(screen.getByRole("button", { name: "Run command" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("complementary", { name: "Prototype controls" })).toBeTruthy();
@@ -84,6 +85,9 @@ describe("Adaptive Island", () => {
     expect(document.querySelector(".approval-text")?.textContent?.replace(/\s+/g, " ").trim()).toBe("Move 3 selected files to the Recycle Bin?");
     expect(screen.getByText("Can be restored from the Recycle Bin")).toBeTruthy();
     expect(document.querySelector(".approval-shell")?.classList.contains("approval-reversible")).toBe(true);
+    expect(document.querySelector(".approval-icon")?.classList.contains("compact-icon")).toBe(false);
+    expect(document.querySelector(".approval-icon")?.classList.contains("error-icon")).toBe(true);
+    expect(document.querySelector(".approval-shell .reversible-action")).toBeTruthy();
     expect(within(screen.getByRole("main", { name: "DeskAct Adaptive Island" })).queryByText(/demo|fixture|preview only/i)).toBeNull();
     await user.click(screen.getByRole("button", { name: "Move to Recycle Bin" }));
     expect(screen.getByText("Moved to Recycle Bin")).toBeTruthy();
@@ -102,6 +106,8 @@ describe("Adaptive Island", () => {
     expect(document.querySelector(".approval-text")?.textContent?.replace(/\s+/g, " ").trim()).toBe("Permanently delete 3 selected files?");
     expect(screen.getByText("Cannot be undone")).toBeTruthy();
     expect(document.querySelector(".approval-shell")?.classList.contains("approval-destructive")).toBe(true);
+    expect(document.querySelector(".approval-icon")?.classList.contains("error-icon")).toBe(true);
+    expect(document.querySelector(".approval-shell .destructive-action")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Delete permanently" }));
     expect(screen.getByText("Permanently deleted")).toBeTruthy();
   });
@@ -114,6 +120,11 @@ describe("Adaptive Island", () => {
     await user.click(controls.getByRole("button", { name: "Voice" }));
     expect(screen.queryByText("Listening…")).toBeNull();
     expect(screen.getByRole("region", { name: "Voice input" })).toBeTruthy();
+    const voiceControls = document.querySelector(".voice-control-row");
+    expect(voiceControls?.querySelector(".mic-active")).toBeTruthy();
+    expect(voiceControls?.querySelector(".voice-wave-slot .wave")).toBeTruthy();
+    expect(voiceControls?.querySelector('[aria-label="Cancel voice input"]')).toBeTruthy();
+    expect(document.querySelector(".voice-transcript-row .transcript-line")).toBeTruthy();
     expect(screen.queryByText("Streaming transcript")).toBeNull();
     await waitFor(() => expect(document.querySelector(".transcript-line")?.textContent?.length).toBeGreaterThan(0));
     await waitFor(() => {
@@ -123,6 +134,16 @@ describe("Adaptive Island", () => {
 
     expect(controls.queryByRole("button", { name: "STT" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Use text" })).toBeNull();
+  });
+
+  it("shows an animated neutral icon for cancelled tasks", () => {
+    const cancelledTask = { ...activeTask, phase: "cancelled" as const, message: "Task cancelled" };
+    render(<TaskStatus task={cancelledTask} onStop={() => {}} />);
+
+    expect(screen.getByText("Task cancelled")).toBeTruthy();
+    expect(screen.getByLabelText("Cancelled")).toBeTruthy();
+    expect(document.querySelector(".task-shell .cancelled-icon")).toBeTruthy();
+    expect(document.querySelector(".task-shell .loader")).toBeNull();
   });
 
   it("presents task status as a simple glass pill with cancellation", async () => {

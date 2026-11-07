@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Check, LoaderCircle, Mic, Send, Sparkles, TriangleAlert, X } from "lucide-react";
+import { Check, CircleX, LoaderCircle, Mic, Send, TriangleAlert, X } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 type PrototypeState = "composer" | "working" | "attention" | "settings" | "voice";
@@ -206,13 +206,13 @@ export default function App() {
     if (!isTauri()) return;
 
     let width: number;
-    if (quitRequested) width = 490;
-    else if (state === "attention") width = 520;
-    else if (state === "composer") width = 720;
-    else if (state === "settings") width = 560;
-    else if (state === "voice") width = 426;
-    else if (task?.phase === "partial" || task?.phase === "failed") width = 491;
-    else width = task?.phase === "completed" || task?.phase === "cancelled" ? 360 : 491;
+    if (quitRequested) width = 500;
+    else if (state === "attention") width = 500;
+    else if (state === "composer") width = 460;
+    else if (state === "settings") width = 480;
+    else if (state === "voice") width = 396;
+    else if (task?.phase === "partial" || task?.phase === "failed") width = 430;
+    else width = task?.phase === "completed" || task?.phase === "cancelled" ? 340 : 430;
     const height = Math.ceil(islandRef.current?.scrollHeight ?? 88);
 
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -426,8 +426,6 @@ export default function App() {
             <form onSubmit={(event) => void submitRequest(event)}>
               <label className="sr-only" htmlFor="request">What would you like DeskAct to do?</label>
               <div className="input-row">
-                <Sparkles className="brand-spark" size={34} aria-hidden="true" />
-                <span className="divider" aria-hidden="true" />
                 <input
                   ref={requestInput}
                   id="request"
@@ -450,15 +448,15 @@ export default function App() {
 
       {contentState === "voice" && (
         <section className="shell compact-shell voice-shell" aria-label="Voice input">
-          <div className="compact-icon mic-active"><Mic size={17} aria-hidden="true" /></div>
-          <div className="voice-copy">
-            <div className="voice-live-row">
-              <div className="wave" aria-hidden="true">{Array.from({ length: 17 }, (_, index) => <i key={index} />)}</div>
-            </div>
+          <div className="voice-control-row">
+            <div className="compact-icon mic-active"><Mic size={24} aria-hidden="true" /></div>
+            <div className="voice-wave-slot"><div className="wave" aria-hidden="true">{Array.from({ length: 17 }, (_, index) => <i key={index} />)}</div></div>
+            <button className="glass-icon" type="button" aria-label="Cancel voice input" onClick={() => selectPreviewState("command")}><X size={22} aria-hidden="true" /></button>
+          </div>
+          <div className="voice-transcript-row">
             <StreamingText text={streamedTranscript} />
             <span className="sr-only" role="status">Listening for voice input.</span>
           </div>
-          <button className="glass-icon" type="button" aria-label="Cancel voice input" onClick={() => selectPreviewState("command")}><X size={22} aria-hidden="true" /></button>
         </section>
       )}
 
@@ -481,7 +479,7 @@ export default function App() {
       {contentState === "attention" && (
         <section className={`shell attention-shell approval-shell ${destructiveApproval ? "approval-destructive" : "approval-reversible"}`} aria-labelledby="attention-title">
           <div className="approval-header">
-            <div className={`compact-icon ${destructiveApproval ? "danger" : "warn"}`} aria-hidden="true"><TriangleAlert size={18} /></div>
+            <TriangleAlert className={`approval-icon error-icon ${destructiveApproval ? "danger" : "warn"}`} size={24} aria-hidden="true" />
             <div>
               <p className="attention-label" id="attention-title">{destructiveApproval ? "Permanent deletion" : "Reversible removal"}</p>
               <p className="status-sub">{destructiveApproval ? "Cannot be undone" : "Can be restored from the Recycle Bin"}</p>
@@ -571,6 +569,7 @@ function StreamingText({ text }: { text: string }) {
 export function TaskStatus({ task, onStop }: { task: TaskSnapshot; onStop: () => void }) {
   const active = isActiveTask(task);
   const complete = task.phase === "completed";
+  const cancelled = task.phase === "cancelled";
   const failed = task.phase === "partial" || task.phase === "failed";
   const label = complete ? task.message || "Task completed"
     : failed ? task.message || "Action needs attention"
@@ -579,13 +578,12 @@ export function TaskStatus({ task, onStop }: { task: TaskSnapshot; onStop: () =>
 
   return (
     <section className="shell task-shell" aria-label="Task status">
-      <Sparkles className="brand-spark" size={32} aria-hidden="true" />
-      <span className="divider" aria-hidden="true" />
       <span className="task-label">{label}</span>
       {active ? <span className="loader" aria-label="Working" />
         : complete ? <Check className="done-icon" size={28} aria-label="Completed" />
           : failed ? <TriangleAlert className="error-icon" size={26} aria-label="Needs attention" />
-            : null}
+            : cancelled ? <CircleX className="cancelled-icon" size={28} aria-label="Cancelled" />
+              : null}
       {active && <button className="glass-icon" type="button" aria-label={task.cancellation_requested ? "Stopping task" : "Cancel task"} disabled={task.cancellation_requested} onClick={onStop}><X size={22} aria-hidden="true" /></button>}
     </section>
   );
