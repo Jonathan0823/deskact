@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 pub const INVOKED_EVENT: &str = "deskact://invoked";
 pub const SETTINGS_EVENT: &str = "deskact://open-settings";
@@ -34,14 +34,14 @@ fn open_window(app: &AppHandle, event: &str) {
         return;
     };
 
-    if !window.is_focused().unwrap_or(false) {
-        if let Some(hwnd) = foreground_window() {
-            *app.state::<PreviousForegroundWindow>()
-                .0
-                .lock()
-                .expect("foreground-window state poisoned") = Some(hwnd);
-            position_on_foreground_monitor(&window, hwnd);
-        }
+    if !window.is_focused().unwrap_or(false)
+        && let Some(hwnd) = foreground_window()
+    {
+        *app.state::<PreviousForegroundWindow>()
+            .0
+            .lock()
+            .expect("foreground-window state poisoned") = Some(hwnd);
+        position_on_foreground_monitor(&window, hwnd);
     }
 
     if window.show().is_ok() && window.set_focus().is_ok() {
@@ -100,6 +100,7 @@ fn restore_window(_hwnd: isize) {}
 #[cfg(windows)]
 fn position_on_foreground_monitor(window: &WebviewWindow, foreground: isize) {
     use std::mem::size_of;
+    use tauri::PhysicalPosition;
     use windows_sys::Win32::{
         Graphics::Gdi::{
             GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,

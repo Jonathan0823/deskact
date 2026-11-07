@@ -87,19 +87,18 @@ pub fn update_global_shortcut(
         return Err(error);
     }
 
-    if previous.registered {
-        if let Ok(previous_shortcut) = parse_shortcut(&previous.accelerator) {
-            if let Err(error) = app.global_shortcut().unregister(previous_shortcut) {
-                let _ = app.global_shortcut().unregister(shortcut);
-                let _ = save_shortcut(app, &previous.accelerator);
-                let status = ShortcutStatus {
-                    error: Some(format!("Could not release the previous shortcut: {error}")),
-                    ..previous
-                };
-                state.replace(status.clone());
-                return Err(status.error.expect("error was set"));
-            }
-        }
+    if previous.registered
+        && let Ok(previous_shortcut) = parse_shortcut(&previous.accelerator)
+        && let Err(error) = app.global_shortcut().unregister(previous_shortcut)
+    {
+        let _ = app.global_shortcut().unregister(shortcut);
+        let _ = save_shortcut(app, &previous.accelerator);
+        let status = ShortcutStatus {
+            error: Some(format!("Could not release the previous shortcut: {error}")),
+            ..previous
+        };
+        state.replace(status.clone());
+        return Err(status.error.expect("error was set"));
     }
 
     let status = ShortcutStatus {
