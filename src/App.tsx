@@ -109,7 +109,10 @@ export default function App() {
     });
     void listen<TaskSnapshot>("deskact://task-updated", (event) => {
       const incoming = event.payload;
-      if (acceptTaskSnapshot(incoming) && isActiveTask(incoming)) setState("working");
+      if (acceptTaskSnapshot(incoming)) {
+        if (isActiveTask(incoming)) setState("working");
+        else setQuitRequested(false);
+      }
     }).then((unlisten) => {
       if (disposed) unlisten();
       else listeners.push(unlisten);
