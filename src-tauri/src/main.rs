@@ -9,12 +9,11 @@ use std::{
 
 use deskact_core::{
     AppCatalogEntry, DeskActError, NativeTargetResolution, TaskExecutionReport, VerifiedNativeCli,
-    add_user_app_entry, edit_user_app_entry, execute_action_plan, load_app_catalog,
-    model_candidate_context, native_inventory, preflight, prepare_app_selection,
-    registered_open_workflow, request_action_plan, request_action_plan_with_context,
+    add_user_app_entry, edit_user_app_entry, execute_prepared_task, load_app_catalog,
+    native_inventory, preflight, prepare_app_selection, prepare_task_request, request_action_plan,
     resolve_native_target, run_calculator_acceptance, run_file_explorer_acceptance,
     run_notepad_acceptance, run_vlc_acceptance, simulate_approval_scenario, simulate_task_scenario,
-    test_llm_connection, validate_action_plan_json, validate_open_app_request,
+    test_llm_connection, validate_action_plan_json,
 };
 
 /// Run the developer-only native preflight, inventory, target-resolution, or acceptance command.
@@ -303,24 +302,9 @@ fn run_task_command(arguments: &[String]) -> ExitCode {
 
 /// Validate task scope, route exact app matches locally, and execute a validated supported plan.
 async fn execute_task_request(request: &str) -> Result<TaskExecutionReport, DeskActError> {
-    if request.trim().is_empty()
-        || request.chars().count() > 4_000
-        || request.chars().any(char::is_control)
-    {
-        return Err(DeskActError::new("Task request must be non-empty, at most 4,000 characters, and contain no control characters".into()));
-    }
-    let catalog = load_app_catalog()?;
-    validate_open_app_request(request, &catalog)?;
-    let (plan, route) = match registered_open_workflow(request, &catalog)? {
-        Some((plan, _entry)) => (plan, "registered_workflow"),
-        None => {
-            let context = model_candidate_context(&catalog)?;
-            let plan = request_action_plan_with_context(request, Some(&context)).await?;
-            (plan, "primary_model")
-        }
-    };
+    let prepared = prepare_task_request(request).await?;
     let mut cli = None;
-    execute_action_plan(&plan, &catalog, route, |entry| {
+    execute_prepared_task(prepared, |entry| {
         if cli.is_none() {
             cli = Some(VerifiedNativeCli::connect()?);
         }

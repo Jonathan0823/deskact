@@ -34,8 +34,9 @@ pub use llm::{
 };
 mod execution;
 pub use execution::{
-    TaskExecutionEvidence, TaskExecutionReport, execute_action_plan, model_candidate_context,
-    open_app_plan, registered_open_workflow, validate_open_app_request,
+    PreparedTask, TaskExecutionEvidence, TaskExecutionReport, execute_action_plan,
+    execute_prepared_task, model_candidate_context, open_app_plan, prepare_task_request,
+    registered_open_workflow, validate_open_app_request,
 };
 mod task;
 pub use task::{
