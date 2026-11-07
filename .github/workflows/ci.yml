@@ -54,7 +54,10 @@ jobs:
         run: |
           npm run check
           npm test
-          npm run build
+      - name: Build prototype frontend
+        run: npm run build
+        env:
+          VITE_PROTOTYPE_PREVIEWS: "true"
       - uses: dtolnay/rust-toolchain@stable
       - name: Build desktop app and developer harness
         run: cargo build --manifest-path src-tauri/Cargo.toml --bin deskact --bin deskact-dev --release --locked
@@ -63,7 +66,7 @@ jobs:
       - name: Upload Windows app and developer harness
         uses: actions/upload-artifact@v7
         with:
-          name: deskact-windows-x64
+          name: deskact-prototype-windows-x64
           path: |
             src-tauri/target/release/deskact.exe
             src-tauri/target/release/deskact-dev.exe

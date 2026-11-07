@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 
 use crate::{
     ActionPlan, ActionPlanStep, AppCatalogEntry, DeskActError, NativeTargetResolution,
-    prepare_app_selection, validate_action_plan_json,
+    load_app_catalog, model_candidate_context, prepare_app_selection,
+    request_action_plan_with_context, validate_action_plan_json,
 };
 
 /// Public result from one completed task-execution request.
@@ -39,6 +40,49 @@ pub struct TaskExecutionEvidence {
     pub snapshot_id: String,
     /// Number of actionable references in the snapshot.
     pub ref_count: usize,
+}
+
+/// A locally validated app-opening request ready for native execution.
+#[derive(Debug, Clone)]
+pub struct PreparedTask {
+    plan: ActionPlan,
+    catalog: Vec<AppCatalogEntry>,
+    route: String,
+}
+
+/// Validate and prepare a request using the local catalog and primary model when needed.
+pub async fn prepare_task_request(request: &str) -> Result<PreparedTask, DeskActError> {
+    if request.trim().is_empty()
+        || request.chars().count() > 4_000
+        || request.chars().any(char::is_control)
+    {
+        return Err(DeskActError::new(
+            "Task request must be non-empty, at most 4,000 characters, and contain no control characters".into(),
+        ));
+    }
+    let catalog = load_app_catalog()?;
+    validate_open_app_request(request, &catalog)?;
+    let (plan, route) = match registered_open_workflow(request, &catalog)? {
+        Some((plan, _entry)) => (plan, "registered_workflow"),
+        None => {
+            let context = model_candidate_context(&catalog)?;
+            let plan = request_action_plan_with_context(request, Some(&context)).await?;
+            (plan, "primary_model")
+        }
+    };
+    Ok(PreparedTask {
+        plan,
+        catalog,
+        route: route.to_owned(),
+    })
+}
+
+/// Execute a prepared request through the native resolver supplied by the host.
+pub fn execute_prepared_task(
+    prepared: PreparedTask,
+    resolve: impl FnMut(&AppCatalogEntry) -> Result<NativeTargetResolution, DeskActError>,
+) -> Result<TaskExecutionReport, DeskActError> {
+    execute_action_plan(&prepared.plan, &prepared.catalog, &prepared.route, resolve)
 }
 
 /// Validate that a request is one complete, explicit app-opening intent within the current executor scope.

@@ -21,6 +21,7 @@
         "minHeight": 150,
         "maxHeight": 560,
         "center": false,
+        "visible": false,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
@@ -30,7 +31,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://localhost:1420 http://127.0.0.1:1420 ws://localhost:1420 ws://127.0.0.1:1420; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {
