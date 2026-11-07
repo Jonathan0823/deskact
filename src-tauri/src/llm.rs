@@ -275,6 +275,14 @@ pub async fn test_llm_connection() -> Result<LlmConnectionReport, DeskActError> 
 
 /// Request a plan from the primary model and allow one bounded correction attempt.
 pub async fn request_action_plan(request: &str) -> Result<ActionPlan, DeskActError> {
+    request_action_plan_with_context(request, None).await
+}
+
+/// Request a plan with privacy-minimal local context such as eligible catalog candidates.
+pub async fn request_action_plan_with_context(
+    request: &str,
+    context: Option<&str>,
+) -> Result<ActionPlan, DeskActError> {
     if request.trim().is_empty()
         || request.chars().count() > 4_000
         || request.chars().any(char::is_control)
@@ -284,7 +292,17 @@ pub async fn request_action_plan(request: &str) -> Result<ActionPlan, DeskActErr
         ));
     }
     let config = LlmConfig::from_env()?;
-    let system = r#"Return only one complete JSON object matching DeskAct action-plan version 1. Schema: {"version":1,"summary":string,"steps":[{"operation":lowercase_identifier,"parameters":object,"expected_outcome":string}]}. Use 1 to 20 steps; summary and expected_outcome must be non-empty and at most 500 characters. This is a proposal, not authorization. Never include shell commands or executable paths."#;
+    let system = if context.is_some() {
+        r#"Return only one complete JSON object matching DeskAct action-plan version 1. Schema: {"version":1,"summary":string,"steps":[{"operation":lowercase_identifier,"parameters":object,"expected_outcome":string}]}. Use 1 to 20 steps; summary and expected_outcome must be non-empty and at most 500 characters. For this executor, the only supported operation is open_app with exactly one parameter app_id selected from the supplied catalog candidates. For each step, expected_outcome must be exactly `<selected candidate display_name> is open`. This is a proposal, not authorization. Never include shell commands or executable paths."#
+    } else {
+        r#"Return only one complete JSON object matching DeskAct action-plan version 1. Schema: {"version":1,"summary":string,"steps":[{"operation":lowercase_identifier,"parameters":object,"expected_outcome":string}]}. Use 1 to 20 steps; summary and expected_outcome must be non-empty and at most 500 characters. This is a proposal, not authorization. Never include shell commands or executable paths."#
+    };
+    let user_request = match context {
+        Some(context) => format!(
+            "Eligible catalog candidates (IDs and display names only): {context}\nPropose a plan for this request: {request}"
+        ),
+        None => format!("Propose a plan for this request: {request}"),
+    };
     let first_response = config
         .complete(vec![
             ChatMessage {
@@ -293,7 +311,7 @@ pub async fn request_action_plan(request: &str) -> Result<ActionPlan, DeskActErr
             },
             ChatMessage {
                 role: "user",
-                content: format!("Propose a plan for this request: {request}"),
+                content: user_request.clone(),
             },
         ])
         .await?;
@@ -310,7 +328,7 @@ pub async fn request_action_plan(request: &str) -> Result<ActionPlan, DeskActErr
             },
             ChatMessage {
                 role: "user",
-                content: format!("Original task request: {request}"),
+                content: user_request.clone(),
             },
             ChatMessage {
                 role: "assistant",
