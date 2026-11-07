@@ -297,9 +297,9 @@ pub async fn request_action_plan(request: &str) -> Result<ActionPlan, DeskActErr
             },
         ])
         .await?;
-    let first_error = match validate_action_plan_json(&first_response) {
+    let validation_feedback = match validate_action_plan_json(&first_response) {
         Ok(plan) => return reject_credential_echo(plan, &config),
-        Err(error) => error.to_string(),
+        Err(_) => "The previous response failed local schema or semantic validation.",
     };
 
     let corrected_response = config
@@ -309,21 +309,25 @@ pub async fn request_action_plan(request: &str) -> Result<ActionPlan, DeskActErr
                 content: system.into(),
             },
             ChatMessage {
+                role: "user",
+                content: format!("Original task request: {request}"),
+            },
+            ChatMessage {
                 role: "assistant",
                 content: first_response,
             },
             ChatMessage {
                 role: "user",
                 content: format!(
-                    "Your prior response failed local validation: {first_error}. Return one corrected complete JSON action plan matching the system contract."
+                    "{validation_feedback} Return one corrected complete JSON action plan matching the system contract."
                 ),
             },
         ])
         .await?;
-    let plan = validate_action_plan_json(&corrected_response).map_err(|error| {
-        DeskActError::new(format!(
-            "Primary model returned an invalid action plan after one bounded correction attempt: {error}"
-        ))
+    let plan = validate_action_plan_json(&corrected_response).map_err(|_| {
+        DeskActError::new(
+            "Primary model returned an invalid action plan after one bounded correction attempt; the corrected response failed local validation and was suppressed".into(),
+        )
     })?;
     reject_credential_echo(plan, &config)
 }

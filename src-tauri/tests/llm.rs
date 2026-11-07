@@ -216,7 +216,32 @@ fn llm_plan_requests_one_correction_for_an_invalid_plan_then_returns_validated_j
         "exactly one bounded correction is allowed"
     );
     assert!(requests[0].contains("Open Calculator"), "{}", requests[0]);
-    assert!(requests[1].contains("correct"), "{}", requests[1]);
+    let correction_body = requests[1]
+        .split_once("\r\n\r\n")
+        .expect("correction HTTP body")
+        .1;
+    let correction_json: serde_json::Value =
+        serde_json::from_str(correction_body).expect("correction Chat Completions request");
+    let messages = correction_json["messages"]
+        .as_array()
+        .expect("messages array");
+    assert_eq!(messages.len(), 4, "{correction_json}");
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[1]["role"], "user");
+    assert!(
+        messages[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Open Calculator")
+    );
+    assert_eq!(messages[2]["role"], "assistant");
+    assert_eq!(messages[3]["role"], "user");
+    assert!(
+        messages[3]["content"]
+            .as_str()
+            .unwrap()
+            .contains("validation")
+    );
     assert!(requests.iter().all(|request| {
         !request
             .split_once("\r\n\r\n")
@@ -284,6 +309,57 @@ fn llm_plan_suppresses_a_valid_plan_that_echoes_the_configured_credential() {
         1,
         "a credential echo is not corrected or retried"
     );
+}
+
+#[test]
+fn llm_plan_does_not_expose_credentials_in_malformed_version_errors() {
+    let secret = "fixture-secret-never-print";
+    let valid_plan = r#"{"version":1,"summary":"Open Calculator","steps":[{"operation":"open_app","parameters":{"app_id":"calculator-id"},"expected_outcome":"Calculator is open"}]}"#;
+    let initial_with_secret = format!(
+        r#"{{"version":"{secret}","summary":"Open Calculator","steps":[{{"operation":"open_app","parameters":{{}},"expected_outcome":"Calculator is open"}}]}}"#
+    );
+    let corrected_with_secret = format!(
+        r#"{{"version":"{secret}","summary":"Open Calculator","steps":[{{"operation":"open_app","parameters":{{}},"expected_outcome":"Calculator is open"}}]}}"#
+    );
+    let empty_plan = r#"{"version":1,"summary":"Open Calculator","steps":[]}"#;
+    let response = |content: &str| {
+        serde_json::json!({"choices":[{"finish_reason":"stop","message":{"content":content}}]})
+            .to_string()
+    };
+    let scenarios = [
+        (response(&initial_with_secret), response(valid_plan), true),
+        (
+            response(empty_plan),
+            response(&corrected_with_secret),
+            false,
+        ),
+    ];
+
+    for (initial, corrected, should_succeed) in scenarios {
+        let endpoint = LoopbackEndpoint::respond_many(vec![
+            (200, "OK".into(), initial),
+            (200, "OK".into(), corrected),
+        ]);
+        let output = Command::new(env!("CARGO_BIN_EXE_deskact-dev"))
+            .args(["llm", "plan", "Open Calculator"])
+            .env("DESKACT_LLM_BASE_URL", &endpoint.base_url)
+            .env("DESKACT_LLM_MODEL", "fixture-model")
+            .env("DESKACT_LLM_API_KEY", secret)
+            .output()
+            .expect("run developer harness");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let requests = endpoint.requests.join().expect("fixture request thread");
+
+        assert_eq!(
+            output.status.success(),
+            should_succeed,
+            "{stdout}; {stderr}"
+        );
+        assert!(!stdout.contains(secret), "{stdout}");
+        assert!(!stderr.contains(secret), "{stderr}");
+        assert_eq!(requests.len(), 2);
+    }
 }
 
 #[test]
