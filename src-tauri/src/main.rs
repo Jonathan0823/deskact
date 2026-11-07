@@ -14,7 +14,7 @@ use deskact_core::{
     registered_open_workflow, request_action_plan, request_action_plan_with_context,
     resolve_native_target, run_calculator_acceptance, run_file_explorer_acceptance,
     run_notepad_acceptance, run_vlc_acceptance, simulate_task_scenario, test_llm_connection,
-    validate_action_plan_json,
+    validate_action_plan_json, validate_open_app_request,
 };
 
 /// Run the developer-only native preflight, inventory, target-resolution, or acceptance command.
@@ -264,9 +264,13 @@ fn run_task_command(arguments: &[String]) -> ExitCode {
         let request = arguments[2..].join(" ");
         return match run_task_async(execute_task_request(&request)) {
             Ok(report) => match serde_json::to_string_pretty(&report) {
-                Ok(report) => {
-                    println!("{report}");
-                    ExitCode::SUCCESS
+                Ok(report_json) => {
+                    println!("{report_json}");
+                    if report.status == "completed" {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::from(1)
+                    }
                 }
                 Err(_) => fail("Could not serialize task execution report".into()),
             },
@@ -278,6 +282,7 @@ fn run_task_command(arguments: &[String]) -> ExitCode {
     ExitCode::from(2)
 }
 
+/// Validate task scope, route exact app matches locally, and execute a validated supported plan.
 async fn execute_task_request(request: &str) -> Result<TaskExecutionReport, DeskActError> {
     if request.trim().is_empty()
         || request.chars().count() > 4_000
@@ -286,6 +291,7 @@ async fn execute_task_request(request: &str) -> Result<TaskExecutionReport, Desk
         return Err(DeskActError::new("Task request must be non-empty, at most 4,000 characters, and contain no control characters".into()));
     }
     let catalog = load_app_catalog()?;
+    validate_open_app_request(request, &catalog)?;
     let (plan, route) = match registered_open_workflow(request, &catalog)? {
         Some((plan, _entry)) => (plan, "registered_workflow"),
         None => {
@@ -294,15 +300,6 @@ async fn execute_task_request(request: &str) -> Result<TaskExecutionReport, Desk
             (plan, "primary_model")
         }
     };
-    if !request
-        .trim()
-        .split_once(' ')
-        .is_some_and(|(verb, app)| verb.eq_ignore_ascii_case("open") && !app.trim().is_empty())
-    {
-        return Err(DeskActError::new(
-            "This executor currently runs only explicit `open <app>` requests; the returned plan was not executed".into(),
-        ));
-    }
     let mut cli = None;
     execute_action_plan(&plan, &catalog, route, |entry| {
         if cli.is_none() {
@@ -312,6 +309,7 @@ async fn execute_task_request(request: &str) -> Result<TaskExecutionReport, Desk
     })
 }
 
+/// Resolve an app target and wait for manual restoration before fresh enumeration if minimized.
 fn resolve_task_target(
     cli: &VerifiedNativeCli,
     entry: &AppCatalogEntry,
@@ -323,11 +321,11 @@ fn resolve_task_target(
                 return Ok(NativeTargetResolution::Ready(target));
             }
             NativeTargetResolution::NeedsManualRestore { app, window } => {
-                print!(
+                eprint!(
                     "Window `{}` for {} is minimized. Restore it manually, then press Enter to re-enumerate (or type q to cancel): ",
                     window.title, app.name
                 );
-                if io::stdout().flush().is_err() {
+                if io::stderr().flush().is_err() {
                     return Err(DeskActError::new(
                         "Could not write the restore prompt".into(),
                     ));
@@ -347,6 +345,7 @@ fn resolve_task_target(
     }
 }
 
+/// Run an async harness operation on the current-thread Tokio runtime.
 fn run_task_async<T>(
     operation: impl Future<Output = Result<T, DeskActError>>,
 ) -> Result<T, DeskActError> {

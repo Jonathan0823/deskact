@@ -293,7 +293,7 @@ pub async fn request_action_plan_with_context(
     }
     let config = LlmConfig::from_env()?;
     let system = if context.is_some() {
-        r#"Return only one complete JSON object matching DeskAct action-plan version 1. Schema: {"version":1,"summary":string,"steps":[{"operation":lowercase_identifier,"parameters":object,"expected_outcome":string}]}. Use 1 to 20 steps; summary and expected_outcome must be non-empty and at most 500 characters. For this executor, the only supported operation is open_app with exactly one parameter app_id selected from the supplied catalog candidates. This is a proposal, not authorization. Never include shell commands or executable paths."#
+        r#"Return only one complete JSON object matching DeskAct action-plan version 1. Schema: {"version":1,"summary":string,"steps":[{"operation":lowercase_identifier,"parameters":object,"expected_outcome":string}]}. Use 1 to 20 steps; summary and expected_outcome must be non-empty and at most 500 characters. For this executor, the only supported operation is open_app with exactly one parameter app_id selected from the supplied catalog candidates. For each step, expected_outcome must be exactly `<selected candidate display_name> is open`. This is a proposal, not authorization. Never include shell commands or executable paths."#
     } else {
         r#"Return only one complete JSON object matching DeskAct action-plan version 1. Schema: {"version":1,"summary":string,"steps":[{"operation":lowercase_identifier,"parameters":object,"expected_outcome":string}]}. Use 1 to 20 steps; summary and expected_outcome must be non-empty and at most 500 characters. This is a proposal, not authorization. Never include shell commands or executable paths."#
     };

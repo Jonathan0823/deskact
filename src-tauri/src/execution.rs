@@ -41,6 +41,70 @@ pub struct TaskExecutionEvidence {
     pub ref_count: usize,
 }
 
+/// Validate that a request is one complete, explicit app-opening intent within the current executor scope.
+pub fn validate_open_app_request(
+    request: &str,
+    catalog: &[AppCatalogEntry],
+) -> Result<(), DeskActError> {
+    let Some((verb, app_request)) = request.trim().split_once(' ') else {
+        return Err(open_scope_error());
+    };
+    let app_request = app_request.trim();
+    if !verb.eq_ignore_ascii_case("open") || app_request.is_empty() {
+        return Err(open_scope_error());
+    }
+    if matches!(
+        prepare_app_selection(catalog, app_request),
+        Ok(crate::AppSelectionInput::ExactMatch { .. })
+    ) {
+        return Ok(());
+    }
+    let normalized = format!(" {} ", app_request.to_lowercase());
+    let compound_markers = [
+        " and ",
+        " then ",
+        " after ",
+        " before ",
+        " to type ",
+        " to enter ",
+        " to save ",
+        " to click ",
+        " to press ",
+        " to write ",
+        " to delete ",
+        " to move ",
+        " to copy ",
+        " to paste ",
+        ";",
+        ",",
+        " & ",
+    ];
+    if compound_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return Err(open_scope_error());
+    }
+    let secondary_actions = [
+        "type", "enter", "save", "click", "press", "write", "delete", "move", "copy", "paste",
+        "select", "play",
+    ];
+    if app_request
+        .split_whitespace()
+        .any(|word| secondary_actions.contains(&word.to_lowercase().as_str()))
+    {
+        return Err(open_scope_error());
+    }
+    Ok(())
+}
+
+/// Return the shared actionable error for requests outside the open-app-only scope.
+fn open_scope_error() -> DeskActError {
+    DeskActError::new(
+        "This executor supports only one explicit `open <app>` intent; compound or other requests are unsupported".into(),
+    )
+}
+
 /// Build a deterministic, registered `open <canonical app name>` workflow when uniquely matched.
 pub fn registered_open_workflow(
     request: &str,
@@ -86,6 +150,30 @@ pub fn open_app_plan(entry: &AppCatalogEntry) -> ActionPlan {
     }
 }
 
+/// Apply Rust's per-step risk policy to the supported native app-opening operation.
+///
+/// A launch from a validated catalog entry is a reversible local action and is allowed without
+/// confirmation. Shortcut arguments and every other operation remain denied by this first slice.
+fn apply_open_app_risk_policy(
+    index: usize,
+    step: &ActionPlanStep,
+    app: &AppCatalogEntry,
+) -> Result<(), DeskActError> {
+    if step.operation != "open_app" {
+        return Err(DeskActError::new(format!(
+            "Action plan step {index} uses unsupported operation `{}`; no actions were executed",
+            step.operation
+        )));
+    }
+    if !app.arguments.trim().is_empty() {
+        return Err(DeskActError::new(format!(
+            "Action plan step {index} selects `{}` whose shortcut requires unsupported arguments; no actions were executed",
+            app.name
+        )));
+    }
+    Ok(())
+}
+
 /// Prevalidate the entire plan, then execute its supported app-opening steps through a resolver.
 pub fn execute_action_plan(
     plan: &ActionPlan,
@@ -98,13 +186,6 @@ pub fn execute_action_plan(
     let plan = validate_action_plan_json(&serialized_plan)?;
     let mut selected = Vec::with_capacity(plan.steps.len());
     for (index, step) in plan.steps.iter().enumerate() {
-        if step.operation != "open_app" {
-            return Err(DeskActError::new(format!(
-                "Action plan step {} uses unsupported operation `{}`; no actions were executed",
-                index + 1,
-                step.operation
-            )));
-        }
         if step.parameters.len() != 1 || !step.parameters.contains_key("app_id") {
             return Err(DeskActError::new(format!(
                 "Action plan step {} must contain exactly one `app_id` parameter; no actions were executed",
@@ -127,6 +208,7 @@ pub fn execute_action_plan(
                     index + 1
                 ))
             })?;
+        apply_open_app_risk_policy(index + 1, step, &app)?;
         let verified_expectation = format!("{} is open", app.name);
         if !step
             .expected_outcome
@@ -243,6 +325,7 @@ mod tests {
     use super::*;
     use crate::AppCatalogSource;
 
+    /// A native-resolution error must be returned as evidence-backed unresolved work.
     #[test]
     fn native_failure_is_reported_as_an_unresolved_step() {
         let entry = AppCatalogEntry {
@@ -264,5 +347,48 @@ mod tests {
         assert!(report.achieved_postconditions.is_empty());
         assert_eq!(report.unresolved_steps.len(), 1);
         assert!(report.unresolved_steps[0].contains("fixture resolution failure"));
+    }
+
+    /// Reject shortcut arguments during whole-plan validation, before any resolver invocation.
+    #[test]
+    fn shortcut_arguments_are_rejected_before_resolution() {
+        let entry = AppCatalogEntry {
+            id: "calculator-id".into(),
+            name: "Calculator".into(),
+            target: "C:\\Windows\\System32\\calc.exe".into(),
+            arguments: "--unsupported".into(),
+            working_directory: String::new(),
+            source: AppCatalogSource::UserConfigured,
+            aliases: Vec::new(),
+        };
+        let result = execute_action_plan(
+            &open_app_plan(&entry),
+            std::slice::from_ref(&entry),
+            "registered_workflow",
+            |_| panic!("invalid shortcut must not reach native resolution"),
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported arguments")
+        );
+    }
+
+    /// Reject compound requests instead of running only their first open-app portion.
+    #[test]
+    fn compound_open_requests_are_outside_the_executor_scope() {
+        let entry = AppCatalogEntry {
+            id: "calculator-id".into(),
+            name: "Calculator".into(),
+            target: "C:\\Windows\\System32\\calc.exe".into(),
+            arguments: String::new(),
+            working_directory: String::new(),
+            source: AppCatalogSource::UserConfigured,
+            aliases: Vec::new(),
+        };
+        let error = validate_open_app_request("open Calculator and type 123", &[entry])
+            .expect_err("compound intent must be rejected");
+        assert!(error.to_string().contains("compound"));
     }
 }
