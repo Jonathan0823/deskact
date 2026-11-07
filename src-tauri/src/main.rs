@@ -13,8 +13,8 @@ use deskact_core::{
     model_candidate_context, native_inventory, preflight, prepare_app_selection,
     registered_open_workflow, request_action_plan, request_action_plan_with_context,
     resolve_native_target, run_calculator_acceptance, run_file_explorer_acceptance,
-    run_notepad_acceptance, run_vlc_acceptance, simulate_task_scenario, test_llm_connection,
-    validate_action_plan_json, validate_open_app_request,
+    run_notepad_acceptance, run_vlc_acceptance, simulate_approval_scenario, simulate_task_scenario,
+    test_llm_connection, validate_action_plan_json, validate_open_app_request,
 };
 
 /// Run the developer-only native preflight, inventory, target-resolution, or acceptance command.
@@ -151,7 +151,7 @@ fn main() -> ExitCode {
 
         _ => {
             eprintln!(
-                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|llm <test|plan <request>|validate-plan>|task <simulate --scenario <name>|execute --request <request>>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
+                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|llm <test|plan <request>|validate-plan>|task <simulate --scenario <name>|approval-simulate --scenario <name>|execute --request <request>>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
             );
             ExitCode::from(2)
         }
@@ -245,6 +245,23 @@ fn run_app_catalog_command(arguments: &[String]) -> ExitCode {
 /// Run recovery simulation or execute one policy-bounded task plan.
 fn run_task_command(arguments: &[String]) -> ExitCode {
     if let [command, flag, scenario] = arguments
+        && command == "approval-simulate"
+        && flag == "--scenario"
+    {
+        return match simulate_approval_scenario(scenario).and_then(|report| {
+            serde_json::to_string_pretty(&report).map_err(|_| {
+                DeskActError::new("Could not serialize approval simulation report".into())
+            })
+        }) {
+            Ok(report) => {
+                println!("{report}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => fail(format!("Approval simulation failed: {error}")),
+        };
+    }
+
+    if let [command, flag, scenario] = arguments
         && command == "simulate"
         && flag == "--scenario"
     {
@@ -278,7 +295,9 @@ fn run_task_command(arguments: &[String]) -> ExitCode {
         };
     }
 
-    eprintln!("Usage: deskact-dev task <simulate --scenario <name>|execute --request <request>");
+    eprintln!(
+        "Usage: deskact-dev task <simulate --scenario <name>|approval-simulate --scenario <name>|execute --request <request>"
+    );
     ExitCode::from(2)
 }
 
