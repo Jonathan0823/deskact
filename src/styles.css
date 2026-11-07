@@ -55,13 +55,6 @@ button { color: inherit; }
 }
 
 .brand-name { font-size: 12px; font-weight: 700; letter-spacing: .02em; }
-.prototype-tag {
-  margin-left: 3px;
-  color: #858c98;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: .11em;
-}
 .icon-button {
   width: 25px;
   height: 23px;

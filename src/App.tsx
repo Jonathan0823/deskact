@@ -230,7 +230,6 @@ export default function App() {
       <header className="island-header">
         <span className="brand-mark" aria-hidden="true">D</span>
         <span className="brand-name">DeskAct</span>
-        <span className="prototype-tag">WINDOW PROTOTYPE</span>
         <button
           className="icon-button"
           type="button"
