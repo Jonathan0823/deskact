@@ -188,6 +188,11 @@ export default function App() {
     try { localStorage.setItem(appearanceStorageKey, JSON.stringify(appearance)); } catch { /* Appearance remains available for this session. */ }
   }, [appearance]);
 
+  useEffect(() => {
+    if (!isTauri()) return;
+    void invoke("set_backdrop_blur", { enabled: appearance.blur > 0 }).catch(() => {});
+  }, [appearance.blur]);
+
   function dismissIsland() {
     if (browserPreview) {
       setPreviewState("hidden");
@@ -514,7 +519,13 @@ export default function App() {
             {(["light", "dark", "system"] as const).map((theme) => <button key={theme} type="button" aria-pressed={appearance.theme === theme} onClick={() => setAppearance((value) => ({ ...value, theme }))}>{theme[0].toUpperCase() + theme.slice(1)}</button>)}
           </div>
           <div className="range-setting"><label htmlFor="glass-opacity">Glass opacity</label><output>{appearance.opacity}%</output><input id="glass-opacity" type="range" min="18" max="85" value={appearance.opacity} onChange={(event) => setAppearance((value) => ({ ...value, opacity: Number(event.target.value) }))} /></div>
-          <div className="range-setting"><label htmlFor="glass-blur">Backdrop blur</label><output>{appearance.blur}px</output><input id="glass-blur" type="range" min="0" max="50" step="2" value={appearance.blur} onChange={(event) => setAppearance((value) => ({ ...value, blur: Number(event.target.value) }))} /></div>
+          <div className="toggle-setting">
+            <span id="glass-blur-label">Backdrop blur</span>
+            <button id="glass-blur" className="toggle-switch" type="button" role="switch" aria-labelledby="glass-blur-label" aria-checked={appearance.blur > 0} onClick={() => setAppearance((value) => ({ ...value, blur: value.blur > 0 ? 0 : 32 }))}>
+              <span className="toggle-thumb" />
+            </button>
+            <span className="toggle-value">{appearance.blur > 0 ? "On" : "Off"}</span>
+          </div>
           {!browserPreview && <>
           <h2 className="settings-subheading">Global shortcut</h2>
           <p className="settings-copy">Open DeskAct from another application.</p>

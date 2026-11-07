@@ -77,7 +77,7 @@ pub async fn morph_window(
         .fetch_add(1, Ordering::Relaxed)
         + 1;
     let target_width = width.clamp(280.0, 560.0);
-    let target_height = height.clamp(48.0, 340.0);
+    let target_height = height.clamp(48.0, 480.0);
     let scale = window
         .scale_factor()
         .map_err(|_| "Could not read DeskAct's display scale".to_owned())?;

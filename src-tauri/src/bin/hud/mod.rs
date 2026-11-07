@@ -6,6 +6,7 @@ mod window_behavior;
 use shortcuts::{ShortcutState, ShortcutStatus};
 use tasks::TaskHub;
 use tauri::Manager;
+use tauri::window::{Effect, EffectsBuilder};
 
 pub fn run() {
     let context = tauri::generate_context!();
@@ -38,6 +39,7 @@ pub fn run() {
             tasks::stop_task,
             yield_focus,
             morph_island_window,
+            set_backdrop_blur,
             quit_application,
             dismiss_island
         ])
@@ -84,6 +86,14 @@ async fn morph_island_window(
     reduced_motion: bool,
 ) -> Result<(), String> {
     window_behavior::morph_window(&app, width, height, reduced_motion).await
+}
+
+#[tauri::command]
+fn set_backdrop_blur(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
+    let effects = enabled.then(|| EffectsBuilder::new().effect(Effect::Acrylic).build());
+    window
+        .set_effects(effects)
+        .map_err(|error| format!("Could not update the native backdrop effect: {error}"))
 }
 
 #[tauri::command]

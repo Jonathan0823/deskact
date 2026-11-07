@@ -53,7 +53,13 @@ describe("Adaptive Island", () => {
     await user.click(darkMode);
     expect(document.querySelector(".app-shell")?.classList.contains("theme-dark")).toBe(true);
     const opacity = screen.getByLabelText("Glass opacity");
-    expect(screen.getByLabelText("Backdrop blur")).toBeTruthy();
+    const backdropBlur = screen.getByRole("switch", { name: "Backdrop blur" });
+    expect(backdropBlur.getAttribute("aria-checked")).toBe("true");
+    await user.click(backdropBlur);
+    expect(backdropBlur.getAttribute("aria-checked")).toBe("false");
+    expect(document.querySelector(".app-shell")?.getAttribute("style")).toContain("--glass-blur: 0px");
+    await user.click(backdropBlur);
+    expect(backdropBlur.getAttribute("aria-checked")).toBe("true");
     fireEvent.change(opacity, { target: { value: "62" } });
     expect((opacity as HTMLInputElement).value).toBe("62");
     expect(document.querySelector(".app-shell")?.getAttribute("style")).toContain("--glass-opacity: 0.62");
