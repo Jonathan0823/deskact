@@ -8,11 +8,13 @@ use std::{
 };
 
 use deskact_core::{
-    DeskActError, NativeTargetResolution, VerifiedNativeCli, add_user_app_entry,
-    edit_user_app_entry, load_app_catalog, native_inventory, preflight, prepare_app_selection,
-    request_action_plan, resolve_native_target, run_calculator_acceptance,
-    run_file_explorer_acceptance, run_notepad_acceptance, run_vlc_acceptance,
-    simulate_task_scenario, test_llm_connection, validate_action_plan_json,
+    AppCatalogEntry, DeskActError, NativeTargetResolution, TaskExecutionReport, VerifiedNativeCli,
+    add_user_app_entry, edit_user_app_entry, execute_action_plan, load_app_catalog,
+    model_candidate_context, native_inventory, preflight, prepare_app_selection,
+    registered_open_workflow, request_action_plan, request_action_plan_with_context,
+    resolve_native_target, run_calculator_acceptance, run_file_explorer_acceptance,
+    run_notepad_acceptance, run_vlc_acceptance, simulate_task_scenario, test_llm_connection,
+    validate_action_plan_json,
 };
 
 /// Run the developer-only native preflight, inventory, target-resolution, or acceptance command.
@@ -149,7 +151,7 @@ fn main() -> ExitCode {
 
         _ => {
             eprintln!(
-                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|llm <test|plan <request>|validate-plan>|task simulate --scenario <name>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
+                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|llm <test|plan <request>|validate-plan>|task <simulate --scenario <name>|execute --request <request>>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
             );
             ExitCode::from(2)
         }
@@ -240,30 +242,121 @@ fn run_app_catalog_command(arguments: &[String]) -> ExitCode {
     }
 }
 
-/// Run a deterministic task-recovery simulation through the developer harness.
+/// Run recovery simulation or execute one policy-bounded task plan.
 fn run_task_command(arguments: &[String]) -> ExitCode {
-    let [command, flag, scenario] = arguments else {
-        eprintln!("Usage: deskact-dev task simulate --scenario <name>");
-        return ExitCode::from(2);
-    };
-    if command != "simulate" || flag != "--scenario" {
-        eprintln!("Usage: deskact-dev task simulate --scenario <name>");
-        return ExitCode::from(2);
+    if let [command, flag, scenario] = arguments
+        && command == "simulate"
+        && flag == "--scenario"
+    {
+        return match simulate_task_scenario(scenario).and_then(|report| {
+            serde_json::to_string_pretty(&report)
+                .map_err(|_| DeskActError::new("Could not serialize task simulation report".into()))
+        }) {
+            Ok(report) => {
+                println!("{report}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => fail(format!("Task simulation failed: {error}")),
+        };
     }
 
-    match simulate_task_scenario(scenario).and_then(|report| {
-        serde_json::to_string_pretty(&report)
-            .map_err(|_| DeskActError::new("Could not serialize task simulation report".into()))
-    }) {
-        Ok(report) => {
-            println!("{report}");
-            ExitCode::SUCCESS
+    if arguments.len() >= 3 && arguments[0] == "execute" && arguments[1] == "--request" {
+        let request = arguments[2..].join(" ");
+        return match run_task_async(execute_task_request(&request)) {
+            Ok(report) => match serde_json::to_string_pretty(&report) {
+                Ok(report) => {
+                    println!("{report}");
+                    ExitCode::SUCCESS
+                }
+                Err(_) => fail("Could not serialize task execution report".into()),
+            },
+            Err(error) => fail(format!("Task execution failed: {error}")),
+        };
+    }
+
+    eprintln!("Usage: deskact-dev task <simulate --scenario <name>|execute --request <request>");
+    ExitCode::from(2)
+}
+
+async fn execute_task_request(request: &str) -> Result<TaskExecutionReport, DeskActError> {
+    if request.trim().is_empty()
+        || request.chars().count() > 4_000
+        || request.chars().any(char::is_control)
+    {
+        return Err(DeskActError::new("Task request must be non-empty, at most 4,000 characters, and contain no control characters".into()));
+    }
+    let catalog = load_app_catalog()?;
+    let (plan, route) = match registered_open_workflow(request, &catalog)? {
+        Some((plan, _entry)) => (plan, "registered_workflow"),
+        None => {
+            let context = model_candidate_context(&catalog)?;
+            let plan = request_action_plan_with_context(request, Some(&context)).await?;
+            (plan, "primary_model")
         }
-        Err(error) => {
-            eprintln!("Task simulation failed: {error}");
-            ExitCode::from(1)
+    };
+    if !request
+        .trim()
+        .split_once(' ')
+        .is_some_and(|(verb, app)| verb.eq_ignore_ascii_case("open") && !app.trim().is_empty())
+    {
+        return Err(DeskActError::new(
+            "This executor currently runs only explicit `open <app>` requests; the returned plan was not executed".into(),
+        ));
+    }
+    let mut cli = None;
+    execute_action_plan(&plan, &catalog, route, |entry| {
+        if cli.is_none() {
+            cli = Some(VerifiedNativeCli::connect()?);
+        }
+        resolve_task_target(cli.as_ref().expect("CLI initialized"), entry)
+    })
+}
+
+fn resolve_task_target(
+    cli: &VerifiedNativeCli,
+    entry: &AppCatalogEntry,
+) -> Result<NativeTargetResolution, DeskActError> {
+    let mut resolution = cli.resolve_target(entry.as_discovered_app())?;
+    loop {
+        match resolution {
+            NativeTargetResolution::Ready(target) => {
+                return Ok(NativeTargetResolution::Ready(target));
+            }
+            NativeTargetResolution::NeedsManualRestore { app, window } => {
+                print!(
+                    "Window `{}` for {} is minimized. Restore it manually, then press Enter to re-enumerate (or type q to cancel): ",
+                    window.title, app.name
+                );
+                if io::stdout().flush().is_err() {
+                    return Err(DeskActError::new(
+                        "Could not write the restore prompt".into(),
+                    ));
+                }
+                let mut response = String::new();
+                let bytes_read = io::stdin().read_line(&mut response).map_err(|_| {
+                    DeskActError::new("Could not read the restore confirmation".into())
+                })?;
+                if bytes_read == 0 || response.trim().eq_ignore_ascii_case("q") {
+                    return Err(DeskActError::new(
+                        "Resolution cancelled; no window was selected".into(),
+                    ));
+                }
+                resolution = cli.resume_after_manual_restore(app)?;
+            }
         }
     }
+}
+
+fn run_task_async<T>(
+    operation: impl Future<Output = Result<T, DeskActError>>,
+) -> Result<T, DeskActError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            DeskActError::new("Could not initialize the asynchronous task runtime".into())
+        })?;
+    runtime.block_on(operation)
 }
 
 /// Run one configured LLM connection, planning, or local-validation command.

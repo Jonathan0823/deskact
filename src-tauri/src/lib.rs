@@ -23,8 +23,13 @@ pub use app_catalog::{
 };
 mod llm;
 pub use llm::{
-    ActionPlan, ActionPlanStep, LlmConnectionReport, request_action_plan, test_llm_connection,
-    validate_action_plan_json,
+    ActionPlan, ActionPlanStep, LlmConnectionReport, request_action_plan,
+    request_action_plan_with_context, test_llm_connection, validate_action_plan_json,
+};
+mod execution;
+pub use execution::{
+    TaskExecutionEvidence, TaskExecutionReport, execute_action_plan, model_candidate_context,
+    open_app_plan, registered_open_workflow,
 };
 mod task;
 pub use task::{

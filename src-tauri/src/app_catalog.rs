@@ -81,7 +81,7 @@ impl AppCatalogEntry {
     }
 
     /// Restore the native resolver's app shape from a locally authoritative catalog entry.
-    pub(crate) fn as_discovered_app(&self) -> DiscoveredApp {
+    pub fn as_discovered_app(&self) -> DiscoveredApp {
         let source = match self.source {
             AppCatalogSource::StartMenu => DiscoverySource::StartMenu,
             AppCatalogSource::AppPaths => DiscoverySource::AppPaths,
