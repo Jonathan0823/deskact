@@ -116,6 +116,17 @@ button { color: inherit; }
 .submit-button:disabled { opacity: .5; cursor: not-allowed; }
 .hint { grid-column: 1 / -1; margin: 0 0 0 2px; color: #747b87; font-size: 10px; }
 .status-surface { display: flex; align-items: center; gap: 11px; padding: 13px; }
+.task-surface { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 13px; }
+.activity-dot.terminal { background: #8c9a86; }
+.fixture-tag { color: #aeb9cb !important; font-size: 9px !important; font-weight: 700; letter-spacing: .04em; }
+.task-detail, .task-detail-list { grid-column: 1 / -1; margin: 2px 0 0; color: #b8bec8; font-size: 11px; line-height: 1.55; }
+.task-detail-list { display: grid; gap: 5px; padding-top: 10px; border-top: 1px solid #343741; }
+.task-detail-list p { margin: 0; }
+.warning-copy { color: #e0b5a0; }
+.last-result { margin-top: 8px; padding: 10px 12px; }
+.last-result p { margin: 4px 0 0; color: #aeb4be; font-size: 11px; }
+.result-label { color: #8e97a5; font-size: 9px; font-weight: 700; letter-spacing: .08em; }
+.submit-error { margin: 6px 3px; }
 .activity-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: #aab6c6; }
 .status-copy { display: grid; flex: 1; gap: 3px; }
 .status-copy strong { font-size: 13px; }

@@ -1,9 +1,26 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 
 type PrototypeState = "composer" | "working" | "attention" | "settings";
+type TaskPhase = "planning" | "running" | "completed" | "partial" | "failed" | "cancelled";
+type TaskReport = {
+  summary: string;
+  status: string;
+  achieved_postconditions: string[];
+  unresolved_steps: string[];
+  evidence: Array<{ app_name: string }>;
+};
+type TaskSnapshot = {
+  task_id: number;
+  revision: number;
+  request: string;
+  phase: TaskPhase;
+  message: string;
+  report: TaskReport | null;
+  test_fixture: boolean;
+};
 type ShortcutStatus = {
   accelerator: string;
   registered: boolean;
@@ -22,13 +39,37 @@ const defaultShortcut: ShortcutStatus = {
   error: null,
 };
 
+function isActiveTask(task: TaskSnapshot | null) {
+  return task?.phase === "planning" || task?.phase === "running";
+}
+
+function isNewerTask(incoming: TaskSnapshot, current: TaskSnapshot | null) {
+  return !current || incoming.task_id > current.task_id ||
+    (incoming.task_id === current.task_id && incoming.revision > current.revision);
+}
+
+function phaseLabel(phase: TaskPhase) {
+  switch (phase) {
+    case "planning": return "Preparing task";
+    case "running": return "Task in progress";
+    case "completed": return "Completed and verified";
+    case "partial": return "Partially completed";
+    case "failed": return "Could not verify completion";
+    case "cancelled": return "Stopped";
+  }
+}
+
 export default function App() {
   const [state, setState] = useState<PrototypeState>("composer");
   const [shortcut, setShortcut] = useState<ShortcutStatus>(defaultShortcut);
   const [shortcutInput, setShortcutInput] = useState(defaultShortcut.accelerator);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [request, setRequest] = useState("");
+  const [task, setTask] = useState<TaskSnapshot | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [detailsExpanded, setDetailsExpanded] = useState(false);
   const requestInput = useRef<HTMLInputElement>(null);
-
+  const taskRef = useRef<TaskSnapshot | null>(null);
   const showPrototypeStates = import.meta.env.DEV || import.meta.env.VITE_PROTOTYPE_PREVIEWS === "true";
 
   useLayoutEffect(() => {
@@ -49,10 +90,7 @@ export default function App() {
     let disposed = false;
     const listeners: Array<() => void> = [];
 
-    void listen("deskact://invoked", () => {
-      setState("composer");
-      requestAnimationFrame(() => requestInput.current?.focus());
-    }).then((unlisten) => {
+    void listen("deskact://invoked", () => { void revealDeskAct(); }).then((unlisten) => {
       if (disposed) unlisten();
       else listeners.push(unlisten);
     });
@@ -63,6 +101,14 @@ export default function App() {
       if (disposed) unlisten();
       else listeners.push(unlisten);
     });
+    void listen<TaskSnapshot>("deskact://task-updated", (event) => {
+      const incoming = event.payload;
+      if (acceptTaskSnapshot(incoming) && isActiveTask(incoming)) setState("working");
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else listeners.push(unlisten);
+    });
+    void refreshCurrentTask();
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -78,6 +124,37 @@ export default function App() {
       window.removeEventListener("keydown", onKeyDown);
     };
   }, []);
+
+  function acceptTaskSnapshot(incoming: TaskSnapshot) {
+    if (!isNewerTask(incoming, taskRef.current)) return false;
+    taskRef.current = incoming;
+    setTask(incoming);
+    return true;
+  }
+
+  async function refreshCurrentTask() {
+    if (!isTauri()) return null;
+    try {
+      const current = await invoke<TaskSnapshot | null>("get_task_snapshot");
+      if (current) {
+        acceptTaskSnapshot(current);
+        if (isActiveTask(current)) setState("working");
+      }
+      return current;
+    } catch {
+      return null;
+    }
+  }
+
+  async function revealDeskAct() {
+    const current = await refreshCurrentTask();
+    if (isActiveTask(current)) {
+      setState("working");
+      return;
+    }
+    setState("composer");
+    requestAnimationFrame(() => requestInput.current?.focus());
+  }
 
   async function refreshShortcut() {
     if (!isTauri()) return;
@@ -106,6 +183,27 @@ export default function App() {
     } catch (error) {
       await refreshShortcut();
       setSaveError(String(error));
+    }
+  }
+
+  async function submitRequest(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const submitted = request.trim();
+    if (!submitted || !isTauri()) return;
+    setSubmitError(null);
+    setDetailsExpanded(false);
+    try {
+      const started = await invoke<TaskSnapshot>("submit_task", { request: submitted });
+      acceptTaskSnapshot(started);
+      setRequest("");
+      setState("working");
+      void invoke("yield_focus");
+    } catch (error) {
+      const current = await refreshCurrentTask();
+      setSubmitError(String(error).startsWith("busy:")
+        ? "DeskAct is busy with the task shown below. Requests are not queued; resubmit after it finishes."
+        : String(error));
+      if (isActiveTask(current)) setState("working");
     }
   }
 
@@ -143,25 +241,39 @@ export default function App() {
       )}
 
       {state === "composer" && (
-        <section className="surface composer-surface" aria-labelledby="composer-title">
-          <label id="composer-title" className="sr-only" htmlFor="request">What would you like DeskAct to do?</label>
-          <input ref={requestInput} id="request" placeholder="What would you like DeskAct to do?" />
-          <button className="submit-button" type="button" aria-label="Submit request" title="Submit request" disabled>
-            <span aria-hidden="true">↑</span>
-          </button>
-          <p className="hint">Prototype only · requests are not executed</p>
-        </section>
+        <>
+          <form className="surface composer-surface" aria-labelledby="composer-title" onSubmit={(event) => void submitRequest(event)}>
+            <label id="composer-title" className="sr-only" htmlFor="request">What would you like DeskAct to do?</label>
+            <input
+              ref={requestInput}
+              id="request"
+              value={request}
+              onChange={(event) => setRequest(event.target.value)}
+              placeholder="What would you like DeskAct to do?"
+            />
+            <button className="submit-button" type="submit" aria-label="Submit request" title="Submit request" disabled={!request.trim()}>
+              <span aria-hidden="true">↑</span>
+            </button>
+            {!isTauri() && <p className="hint">Prototype only · requests are not executed in browser preview</p>}
+          </form>
+          {submitError && <p className="error-message submit-error" role="alert">{submitError}</p>}
+          {task && !isActiveTask(task) && <TaskResult task={task} />}
+        </>
       )}
 
       {state === "working" && (
-        <section className="surface status-surface" aria-label="Simulated task status">
-          <span className="activity-dot" aria-hidden="true" />
-          <div className="status-copy">
-            <strong>Simulated task in progress</strong>
-            <span>No desktop action is running.</span>
-          </div>
-          <button className="quiet-button" type="button" aria-label="Expand simulated task details">Details</button>
-        </section>
+        task ? (
+          <TaskStatus task={task} detailsExpanded={detailsExpanded} onToggleDetails={() => setDetailsExpanded((value) => !value)} />
+        ) : (
+          <section className="surface status-surface" aria-label="Simulated task status">
+            <span className="activity-dot" aria-hidden="true" />
+            <div className="status-copy">
+              <strong>Simulated task in progress</strong>
+              <span>No desktop action is running.</span>
+            </div>
+            <button className="quiet-button" type="button" aria-label="Expand simulated task details">Details</button>
+          </section>
+        )
       )}
 
       {state === "attention" && (
@@ -203,5 +315,60 @@ export default function App() {
         </section>
       )}
     </main>
+  );
+}
+
+function TaskStatus({
+  task,
+  detailsExpanded,
+  onToggleDetails,
+}: {
+  task: TaskSnapshot;
+  detailsExpanded: boolean;
+  onToggleDetails: () => void;
+}) {
+  return (
+    <section className="surface task-surface" aria-label="Task status">
+      <span className={`activity-dot ${isActiveTask(task) ? "" : "terminal"}`} aria-hidden="true" />
+      <div className="status-copy">
+        <strong>{task.test_fixture ? "Test fixture · simulated outcome" : phaseLabel(task.phase)}</strong>
+        <span>{task.test_fixture ? "No desktop action was dispatched." : task.message}</span>
+        {task.test_fixture && <span className="fixture-tag">TEST FIXTURE · result is not native verification</span>}
+      </div>
+      {(task.report || task.phase === "planning" || task.phase === "running") && (
+        <button className="quiet-button" type="button" aria-expanded={detailsExpanded} onClick={onToggleDetails}>
+          {detailsExpanded ? "Hide details" : "Details"}
+        </button>
+      )}
+      {detailsExpanded && task.report && <TaskReportDetails report={task.report} testFixture={task.test_fixture} />}
+      {detailsExpanded && !task.report && <p className="task-detail">DeskAct is checking the request and its supported app target.</p>}
+    </section>
+  );
+}
+
+function TaskResult({ task }: { task: TaskSnapshot }) {
+  return (
+    <section className="surface last-result" aria-label="Last task result">
+      <span className="result-label">{task.test_fixture ? "TEST FIXTURE · SIMULATED" : `LAST TASK · ${phaseLabel(task.phase)}`}</span>
+      <p>{task.test_fixture ? "No desktop action was dispatched." : task.message}</p>
+    </section>
+  );
+}
+
+function TaskReportDetails({ report, testFixture }: { report: TaskReport; testFixture: boolean }) {
+  return (
+    <div className="task-detail-list">
+      <strong>{testFixture ? "Fixture-only outcome" : report.status === "completed" ? "Verified results" : "Outcome details"}</strong>
+      {testFixture ? (
+        <p>Fixture data only; no native action or verification was performed.</p>
+      ) : (
+        <>
+          {report.evidence.map((item) => <p key={item.app_name}>{item.app_name}: open in a uniquely matched accessible window with a fresh snapshot.</p>)}
+          {report.achieved_postconditions.map((item) => <p key={item}>{item}</p>)}
+          {report.unresolved_steps.map((item) => <p className="warning-copy" key={item}>{item}</p>)}
+          {!report.evidence.length && !report.unresolved_steps.length && <p>{report.summary}</p>}
+        </>
+      )}
+    </div>
   );
 }
