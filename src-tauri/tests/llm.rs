@@ -183,7 +183,8 @@ fn llm_plan_requests_one_correction_for_an_invalid_plan_then_returns_validated_j
     let invalid_plan = r#"{"version":1,"summary":"Open Calculator","steps":[]}"#;
     let valid_plan = r#"{"version":1,"summary":"Open Calculator","steps":[{"operation":"open_app","parameters":{"app_id":"calculator-id"},"expected_outcome":"Calculator is open"}]}"#;
     let response = |content: &str| {
-        serde_json::json!({"choices":[{"message":{"content":content}}]}).to_string()
+        serde_json::json!({"choices":[{"finish_reason":"stop","message":{"content":content}}]})
+            .to_string()
     };
     let endpoint = LoopbackEndpoint::respond_many(vec![
         (200, "OK".into(), response(invalid_plan)),
@@ -223,6 +224,33 @@ fn llm_plan_requests_one_correction_for_an_invalid_plan_then_returns_validated_j
             .1
             .contains("fixture-secret-never-print")
     }));
+}
+
+#[test]
+fn llm_plan_rejects_length_and_content_filter_finish_reasons() {
+    let plan = r#"{"version":1,"summary":"Plan","steps":[{"operation":"open_app","parameters":{},"expected_outcome":"App is open"}]}"#;
+    for (finish_reason, diagnostic) in [
+        ("length", "completion was cut off by the token limit"),
+        (
+            "content_filter",
+            "completion was rejected by the provider content filter",
+        ),
+    ] {
+        let response = serde_json::json!({"choices":[{"finish_reason":finish_reason,"message":{"content":plan}}]}).to_string();
+        let endpoint = LoopbackEndpoint::respond(200, "OK", &response);
+        let output = Command::new(env!("CARGO_BIN_EXE_deskact-dev"))
+            .args(["llm", "plan", "Open an app"])
+            .env("DESKACT_LLM_BASE_URL", &endpoint.base_url)
+            .env("DESKACT_LLM_MODEL", "fixture-model")
+            .output()
+            .expect("run developer harness");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let requests = endpoint.requests.join().expect("fixture request thread");
+
+        assert!(!output.status.success());
+        assert!(stderr.to_ascii_lowercase().contains(diagnostic), "{stderr}");
+        assert_eq!(requests.len(), 1, "incomplete completions are not retried");
+    }
 }
 
 #[test]

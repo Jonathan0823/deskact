@@ -192,11 +192,28 @@ impl LlmConfig {
                     .into(),
             )
         })?;
-        let content = response
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|choice| choice.message.content)
+        let choice = response.choices.into_iter().next().ok_or_else(|| {
+            DeskActError::new(
+                "Endpoint reachable, but response contained no completion choice".into(),
+            )
+        })?;
+        match choice.finish_reason.as_deref() {
+            Some("length") => {
+                return Err(DeskActError::new(
+                    "Endpoint reachable, but completion was cut off by the token limit".into(),
+                ));
+            }
+            Some("content_filter") => {
+                return Err(DeskActError::new(
+                    "Endpoint reachable, but completion was rejected by the provider content filter"
+                        .into(),
+                ));
+            }
+            _ => {}
+        }
+        let content = choice
+            .message
+            .content
             .filter(|content| !content.trim().is_empty())
             .ok_or_else(|| {
                 DeskActError::new(
@@ -227,6 +244,7 @@ struct ChatResponse {
 #[derive(Deserialize)]
 struct ChatChoice {
     message: ChatMessageResponse,
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
