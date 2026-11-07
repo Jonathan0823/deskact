@@ -32,7 +32,7 @@ npm ci
 npm run dev:app
 ```
 
-Open DeskAct from the tray or global shortcut, submit `open DeskAct Fixture App`, and confirm that the status changes from planning to a clearly marked simulated outcome. Verify that no application launches. Clear the environment variables after the test. Do not distribute a debug build with fixture mode enabled.
+Open DeskAct from the tray or global shortcut, submit `open DeskAct Fixture App`, and confirm that the status changes from planning to a clearly marked simulated outcome. Verify that no application launches. To check Stop without native effects, set `$env:DESKACT_HUD_TEST_FIXTURE_DELAY_MS = '5000'`, submit the same request, then press Stop while the fixture is waiting; it should end as cancelled and explicitly report that no desktop action was dispatched. Clear both environment variables after the test. Do not distribute a debug build with fixture mode enabled.
 
 ## Real supported path
 
@@ -40,4 +40,4 @@ For a real app-opening check, unset `DESKACT_HUD_TEST_FIXTURE`, install the docu
 
 ## What this smoke test does not prove
 
-Browser component tests and fixture mode do not establish Windows focus restoration, non-activating passive status, transparent-region click-through, DPI behavior, monitor movement, or native verification. Those require the separate interactive Windows checklist. Stop/cancel and fully recoverable attention states are implemented in later tickets.
+Browser component tests and fixture mode do not establish Windows focus restoration, non-activating passive status, transparent-region click-through, DPI behavior, monitor movement, or native verification. Those require the separate interactive Windows checklist. The fixture can be delayed for Stop testing. Cancellation cannot roll back an app opening already in flight; the task report communicates that uncertainty.
