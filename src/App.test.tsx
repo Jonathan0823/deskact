@@ -62,6 +62,10 @@ describe("Adaptive Island", () => {
     expect(screen.getByText("Preview only · no files will change")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Approve" }));
     expect(screen.getByText("Playback verified")).toBeTruthy();
+    expect(screen.queryByRole("progressbar", { name: "Task in progress" })).toBeNull();
+    await user.click(controls.getByRole("button", { name: "Error" }));
+    expect(screen.getByRole("main", { name: "DeskAct Adaptive Island" }).className).toContain("state-error");
+    expect(screen.getByText("Couldn't identify the right window")).toBeTruthy();
   });
 
   it("presents task status as a compact island with text controls", async () => {
@@ -72,6 +76,7 @@ describe("Adaptive Island", () => {
 
     expect(screen.getByRole("region", { name: "Task status" }).className).toContain("compact-shell");
     expect(screen.getByText("Opening Spotify")).toBeTruthy();
+    expect(screen.getByRole("progressbar", { name: "Task in progress" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Stop" }));
     expect(onStop).toHaveBeenCalledOnce();
     await user.click(screen.getByRole("button", { name: "Details" }));

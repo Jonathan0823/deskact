@@ -43,6 +43,9 @@ button { color: inherit; cursor: pointer; }
 .state-working { width: min(100%, 352px); }
 .state-done, .state-cancelled { width: min(100%, 296px); }
 .state-error { width: min(100%, 366px); }
+.state-error .status-title { color: #e59a9d; }
+.state-error .status-sub { color: #bd858a; }
+.state-done .status-title { color: #81cfaa; }
 .state-attention { width: min(100%, 490px); border-radius: 23px; }
 .state-settings { width: min(100%, 520px); border-radius: 23px; }
 .island.expanded { width: min(100%, 502px); border-radius: 23px; }
@@ -113,6 +116,10 @@ button { color: inherit; cursor: pointer; }
   font-size: 11px;
   line-height: 1.5;
 }
+.progress-track { grid-column: 1 / -1; height: 3px; overflow: hidden; border-radius: 10px; background: #343d4e; }
+.progress-indicator { display: block; width: 32%; height: 100%; border-radius: inherit; background: #a5bdff; animation: progress-sweep 1.45s cubic-bezier(.55, .05, .45, .95) infinite; }
+@keyframes progress-sweep { from { transform: translateX(-110%); } to { transform: translateX(420%); } }
+.state-error .progress-track { display: none; }
 .task-detail-list p { margin: 0; }
 .task-detail-list .task-detail-list { margin: 0; padding: 0; border: 0; }
 .mini-label { color: #8996a9; font-size: 9px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase; }

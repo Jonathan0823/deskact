@@ -123,7 +123,7 @@ export default function App() {
     else if (state === "attention") dimensions = [490, 200];
     else if (detailsExpanded) dimensions = [502, 200];
     else if (task?.phase === "partial" || task?.phase === "failed") dimensions = [366, 64];
-    else dimensions = [task?.phase === "completed" || task?.phase === "cancelled" ? 296 : 352, 56];
+    else dimensions = [task?.phase === "completed" || task?.phase === "cancelled" ? 296 : 352, isActiveTask(task) ? 64 : 56];
 
     void getCurrentWindow().setSize(new LogicalSize(...dimensions)).catch(() => {});
   }, [state, quitRequested, detailsExpanded, task?.phase]);
@@ -402,6 +402,11 @@ export function TaskStatus({
       <button className="text-control detail-control" type="button" aria-expanded={detailsExpanded} onClick={onToggleDetails}>
         {detailsExpanded ? "Hide" : "Details"}
       </button>
+      {active && (
+        <div className="progress-track" role="progressbar" aria-label="Task in progress" aria-valuetext="Working">
+          <span className="progress-indicator" />
+        </div>
+      )}
       {detailsExpanded && (
         <div className="task-detail-list">
           <span className="mini-label">{task.test_fixture ? "Preview details" : task.report?.status === "completed" ? "Verified result" : "Task details"}</span>
