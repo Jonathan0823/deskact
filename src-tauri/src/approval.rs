@@ -70,6 +70,11 @@ pub struct ApprovalSimulationReport {
 
 /// Classify an action from its locally interpreted operation, never from model claims.
 pub fn classify_action(scope: &ActionScope) -> Result<ActionRiskClass, DeskActError> {
+    if scope.target.trim().is_empty() || scope.target.chars().any(char::is_control) {
+        return Err(DeskActError::new(
+            "Action scope must contain a non-empty target without control characters".into(),
+        ));
+    }
     match scope.action.as_str() {
         "read_file" => Ok(ActionRiskClass::ReadOnly),
         "open_app" => Ok(ActionRiskClass::Reversible),
@@ -255,6 +260,11 @@ mod tests {
             ..fixture_scope()
         };
         assert!(classify_action(&unknown).is_err());
+        let incomplete = ActionScope {
+            target: "  ".into(),
+            ..fixture_scope()
+        };
+        assert!(classify_action(&incomplete).is_err());
     }
 
     /// An approval authorizes an exact scope and becomes stale after any scope change.
