@@ -4,7 +4,9 @@ DeskAct is a Windows-first, accessibility-first desktop assistant for finding, o
 
 ## Adaptive Island app prototype
 
-The repository now contains an early Tauri v2 + React/Tailwind Windows app prototype. Composer/status/attention preview controls are explicitly simulated and never authorize actions. The composer can submit the currently supported app-opening workflow; Rust owns its state and reports verified native results. Active tasks expose Details and Stop controls, and quitting during work requires explicit confirmation that in-flight effects may be uncertain and are not rolled back. Debug fixture mode exercises this path without launching apps. The native window is hidden until opened through configurable Ctrl+Shift+Space or the tray; tray settings allow shortcut reassignment and expose registration failures. The window is frameless and transparent, and is positioned near the top center of the invocation monitor. Click-through, focus restoration, DPI, and multi-monitor behavior still require interactive Windows validation.
+DeskAct is one Tauri v2 application, not separate UI and AI apps. `deskact.exe` is the Rust/Tauri host; the React/Tailwind UI runs in its WebView and communicates with Rust through typed Tauri commands and events. The shared Rust core owns routing, task execution, verification, and the LLM client; endpoint credentials and model requests stay in Rust. The configured LLM endpoint is external to DeskAct. The separate `deskact-dev.exe` is a developer-only CLI test harness, not another desktop-app version; CI publishes it as a separate developer artifact, not alongside the app executable.
+
+The app's composer submits the currently supported app-opening workflow; Rust owns task state and reports verified native results. Active tasks expose Details and Stop controls, and quitting during work requires explicit confirmation that in-flight effects may be uncertain and are not rolled back. Debug fixture mode exercises this path without launching apps. Preview-only state controls appear in development, not in the Windows app artifact. The native window is hidden until opened through configurable Ctrl+Shift+Space or the tray; tray settings allow shortcut reassignment and expose registration failures. The window is frameless and transparent, and is positioned near the top center of the invocation monitor. Click-through, focus restoration, DPI, and multi-monitor behavior still require interactive Windows validation.
 
 With Node.js 24+ and a Rust toolchain installed, run the app from the repository root:
 
@@ -13,7 +15,7 @@ npm ci
 npm run dev:app
 ```
 
-Build the web UI with `npm run build`. Windows CI builds `deskact.exe` with explicit simulated preview controls and publishes it with the developer harness as the `deskact-prototype-windows-x64` artifact; it does not produce an installer. See the [non-destructive HUD task smoke test](docs/implementation/adaptive-island-task-smoke-test.md) for deterministic fixture-mode testing. The fixture adapter is disabled in release builds. Real native-window behavior must still be checked on an interactive Windows desktop.
+Build the web UI with `npm run build`. Run `npm run dev:app` to start Tauri and its Vite dev server together; the dev URL and Vite bind address are both `127.0.0.1:1420`. Windows CI publishes `deskact.exe` alone as `deskact-prototype-windows-x64`, plus the optional CLI harness separately as `deskact-dev-harness-windows-x64`; it does not produce an installer. See the [non-destructive HUD task smoke test](docs/implementation/adaptive-island-task-smoke-test.md) for deterministic fixture-mode testing. The fixture adapter is disabled in release builds. Real native-window behavior must still be checked on an interactive Windows desktop.
 
 ## Automation tools are installed separately
 
