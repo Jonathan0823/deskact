@@ -53,7 +53,7 @@ describe("Adaptive Island", () => {
     await user.click(darkMode);
     expect(document.querySelector(".app-shell")?.classList.contains("theme-dark")).toBe(true);
     const opacity = screen.getByLabelText("Glass opacity");
-    const backdropBlur = screen.getByRole("switch", { name: "Mica material" });
+    const backdropBlur = screen.getByRole("switch", { name: "Desktop Acrylic backdrop" });
     expect(backdropBlur.getAttribute("aria-checked")).toBe("true");
     await user.click(backdropBlur);
     expect(backdropBlur.getAttribute("aria-checked")).toBe("false");

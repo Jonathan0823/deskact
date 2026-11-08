@@ -10,7 +10,11 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Webview
 
 #[cfg(windows)]
 use windows_sys::Win32::Graphics::{
-    Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute},
+    Dwm::{
+        DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+        DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+        DwmSetWindowAttribute,
+    },
     Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn},
 };
 
@@ -187,9 +191,58 @@ fn restore_foreground(app: &AppHandle) {
 }
 
 #[cfg(windows)]
+pub fn set_dwm_backdrop(window: &WebviewWindow, enabled: bool, dark: bool) -> Result<(), String> {
+    let hwnd = window
+        .hwnd()
+        .map_err(|_| "Could not access DeskAct's native window handle".to_owned())?;
+    let dark_mode = i32::from(dark);
+    let backdrop_type = if enabled {
+        DWMSBT_TRANSIENTWINDOW
+    } else {
+        DWMSBT_NONE
+    };
+    unsafe {
+        let dark_result = DwmSetWindowAttribute(
+            hwnd.0,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            (&dark_mode as *const i32).cast(),
+            std::mem::size_of::<i32>() as u32,
+        );
+        let backdrop_result = DwmSetWindowAttribute(
+            hwnd.0,
+            DWMWA_SYSTEMBACKDROP_TYPE as u32,
+            (&backdrop_type as *const i32).cast(),
+            std::mem::size_of::<i32>() as u32,
+        );
+        if backdrop_result < 0 {
+            return Err(format!(
+                "DWM system backdrops are unavailable (HRESULT 0x{:08X})",
+                backdrop_result as u32
+            ));
+        }
+        if dark_result < 0 {
+            return Err(format!(
+                "Could not set the DWM theme (HRESULT 0x{:08X})",
+                dark_result as u32
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn foreground_window() -> Option<isize> {
     let hwnd = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
     (!hwnd.is_null()).then_some(hwnd as isize)
+}
+
+#[cfg(not(windows))]
+pub fn set_dwm_backdrop(
+    _window: &WebviewWindow,
+    _enabled: bool,
+    _dark: bool,
+) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(not(windows))]

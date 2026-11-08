@@ -6,7 +6,6 @@ mod window_behavior;
 use shortcuts::{ShortcutState, ShortcutStatus};
 use tasks::TaskHub;
 use tauri::Manager;
-use tauri::window::{Effect, EffectsBuilder};
 
 pub fn run() {
     let context = tauri::generate_context!();
@@ -95,17 +94,7 @@ fn set_backdrop_material(
     enabled: bool,
     dark: bool,
 ) -> Result<(), String> {
-    let effects = enabled.then(|| {
-        let effect = if dark {
-            Effect::MicaDark
-        } else {
-            Effect::MicaLight
-        };
-        EffectsBuilder::new().effect(effect).build()
-    });
-    window
-        .set_effects(effects)
-        .map_err(|error| format!("Could not update the native backdrop effect: {error}"))
+    window_behavior::set_dwm_backdrop(&window, enabled, dark)
 }
 
 #[tauri::command]

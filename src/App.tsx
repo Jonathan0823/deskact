@@ -529,7 +529,7 @@ export default function App() {
           </div>
           <div className="range-setting"><label htmlFor="glass-opacity">Glass opacity</label><output>{appearance.opacity}%</output><input id="glass-opacity" type="range" min="18" max="85" value={appearance.opacity} onChange={(event) => setAppearance((value) => ({ ...value, opacity: Number(event.target.value) }))} /></div>
           <div className="toggle-setting">
-            <span id="mica-material-label">Mica material</span>
+            <span id="mica-material-label">Desktop Acrylic backdrop</span>
             <button id="mica-material" className="toggle-switch" type="button" role="switch" aria-labelledby="mica-material-label" aria-checked={appearance.micaEnabled} onClick={() => setAppearance((value) => ({ ...value, micaEnabled: !value.micaEnabled }))}>
               <span className="toggle-thumb" />
             </button>
