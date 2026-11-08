@@ -16,7 +16,7 @@ use windows_sys::Win32::{
     },
     UI::{
         HiDpi::GetDpiForWindow,
-        Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+        Shell::{DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
             GWL_EXSTYLE, GWL_STYLE, GetWindowLongW, GetWindowRect, HWND_TOP, STYLESTRUCT,
             SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW,
@@ -97,8 +97,17 @@ pub unsafe fn install(hwnd: HWND) -> io::Result<()> {
     Ok(())
 }
 
-/// Update the native clip on its owning thread. The resize hook then reapplies it
-/// for each new HWND size, before Windows paints a rectangular intermediate frame.
+/// Read the radius currently stored by the native frame guard.
+pub fn corner_radius(hwnd: HWND) -> usize {
+    let mut radius = 52;
+    unsafe {
+        GetWindowSubclass(hwnd, Some(frame_proc), SUBCLASS_ID, &mut radius);
+    }
+    radius
+}
+
+/// Update the shape on the HWND's owning thread. The resize hook reapplies it
+/// for every intermediate native size.
 ///
 /// # Safety
 /// `hwnd` must be a live window with this frame guard installed.
@@ -180,6 +189,7 @@ unsafe extern "system" fn frame_proc(
                     // Shape and dimensions change in the same native message,
                     // not in a later async Tauri command after the window grew.
                     let _ = apply_region(hwnd, position.cx, position.cy, radius);
+                    super::windows_backdrop::resize(hwnd, position.cx, position.cy, radius);
                 }
             }
             WM_STYLECHANGING if lparam != 0 => {
@@ -195,6 +205,7 @@ unsafe extern "system" fn frame_proc(
             WM_NCACTIVATE => return DefSubclassProc(hwnd, message, wparam, -1),
             WM_NCCALCSIZE | WM_NCPAINT => return 0,
             WM_NCDESTROY => {
+                super::windows_backdrop::detach(hwnd);
                 RemoveWindowSubclass(hwnd, Some(frame_proc), SUBCLASS_ID);
             }
             _ => {}

@@ -604,6 +604,8 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-global-shortcut",
  "tokio",
+ "windows",
+ "windows-numerics",
  "windows-sys 0.59.0",
 ]
 

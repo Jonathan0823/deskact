@@ -156,7 +156,7 @@ export default function App() {
   const browserPreview = import.meta.env.DEV && !isTauri();
   const prefersReducedMotion = useReducedMotion();
   const resolvedTheme = appearance.theme === "system" ? (systemPrefersDark ? "dark" : "light") : appearance.theme;
-  const shellStyle = { "--glass-opacity": appearance.opacity / 100, "--glass-blur": appearance.micaEnabled ? "32px" : "0px" } as CSSProperties;
+  const shellStyle = { "--glass-opacity": appearance.opacity / 100 } as CSSProperties;
   const displayedState = browserPreview ? previewView(previewState) : islandVisible ? state : "hidden";
   const displayedTask = browserPreview ? previewTask(previewState, previewStep) : task;
   const lastPreviewState = useRef<PreviewState>("command");
@@ -190,8 +190,8 @@ export default function App() {
 
   useEffect(() => {
     if (!isTauri()) return;
-    void invoke("set_backdrop_material", { enabled: appearance.micaEnabled, dark: resolvedTheme === "dark" }).catch(() => {});
-  }, [appearance.micaEnabled, resolvedTheme]);
+    void invoke("set_backdrop_material", { enabled: appearance.micaEnabled }).catch(() => {});
+  }, [appearance.micaEnabled]);
 
   function dismissIsland() {
     if (browserPreview) {
@@ -529,7 +529,7 @@ export default function App() {
           </div>
           <div className="range-setting"><label htmlFor="glass-opacity">Glass opacity</label><output>{appearance.opacity}%</output><input id="glass-opacity" type="range" min="18" max="85" value={appearance.opacity} onChange={(event) => setAppearance((value) => ({ ...value, opacity: Number(event.target.value) }))} /></div>
           <div className="toggle-setting">
-            <span id="mica-material-label">Desktop Acrylic backdrop</span>
+            <span id="mica-material-label">Desktop glass blur</span>
             <button id="mica-material" className="toggle-switch" type="button" role="switch" aria-labelledby="mica-material-label" aria-checked={appearance.micaEnabled} onClick={() => setAppearance((value) => ({ ...value, micaEnabled: !value.micaEnabled }))}>
               <span className="toggle-thumb" />
             </button>

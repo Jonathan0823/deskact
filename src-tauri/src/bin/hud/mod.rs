@@ -3,6 +3,8 @@ mod tasks;
 mod tray;
 mod window_behavior;
 #[cfg(windows)]
+mod windows_backdrop;
+#[cfg(windows)]
 mod windows_frame;
 
 use shortcuts::{ShortcutState, ShortcutStatus};
@@ -100,12 +102,20 @@ async fn morph_island_window(
 }
 
 #[tauri::command]
-fn set_backdrop_material(
-    window: tauri::WebviewWindow,
-    enabled: bool,
-    dark: bool,
-) -> Result<(), String> {
-    window_behavior::set_dwm_backdrop(&window, enabled, dark)
+fn set_backdrop_material(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let hwnd = window
+            .hwnd()
+            .map_err(|_| "Could not access DeskAct's native window handle".to_owned())?;
+        let radius = windows_frame::corner_radius(hwnd.0);
+        return unsafe { windows_backdrop::set_material(hwnd.0, enabled, radius) };
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, enabled);
+        Ok(())
+    }
 }
 
 #[tauri::command]
