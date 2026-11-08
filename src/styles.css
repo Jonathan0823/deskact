@@ -46,7 +46,7 @@ button { color: inherit; cursor: pointer; }
   background: #000;
   box-shadow: 0 14px 42px rgb(6 12 31 / 24%);
   transform-origin: top center;
-  transition: width 260ms cubic-bezier(.22,1,.36,1), height 260ms cubic-bezier(.22,1,.36,1), border-radius 260ms cubic-bezier(.22,1,.36,1), opacity 200ms ease, transform 240ms cubic-bezier(.22,1,.36,1), visibility 0s linear 240ms;
+  transition: width 260ms cubic-bezier(.22,1,.36,1), height 260ms cubic-bezier(.22,1,.36,1), border-radius 260ms cubic-bezier(.22,1,.36,1), opacity var(--island-transition-duration,180ms) cubic-bezier(.22,1,.36,1), transform var(--island-transition-duration,180ms) cubic-bezier(.22,1,.36,1), visibility 0s linear var(--island-transition-duration,180ms);
 }
 .island.is-hidden { opacity: 0; transform: translateY(-18px) scale(.94); visibility: hidden; pointer-events: none; }
 .island-content { position: relative; width: 100%; }
@@ -263,7 +263,9 @@ button:focus-visible { outline: 2px solid #92b5ff; outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
  .cancelled-icon, .cancelled-icon circle, .cancelled-icon path { animation-duration: .01ms !important; animation-delay: 0ms !important; }
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
-  .island.is-hidden { transition-delay: 0s; }
+  .island { transition-duration: 260ms, 260ms, 260ms, var(--island-transition-duration), 0s, 0s !important; transition-delay: 0s, 0s, 0s, 0s, 0s, var(--island-transition-duration) !important; }
+  .island.reduced-motion.is-hidden { transform: none; }
+  .island.reduced-motion:not(.is-hidden) { transition-delay: 0s, 0s, 0s, 0s, 0s, 0s !important; }
 }
 
 /* Soft Glass surface adapted from DeskAct_Soft_Glass_Translucent_v0.3.html */

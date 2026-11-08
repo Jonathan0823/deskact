@@ -52,6 +52,7 @@ type ShortcutStatus = {
 
 const appearanceStorageKey = "deskact-appearance-v1";
 const islandTransitionMs = 180;
+const reducedIslandTransitionMs = 100;
 const defaultAppearance: AppearanceSettings = { theme: "light", opacity: 48, micaEnabled: true };
 function readAppearance(): AppearanceSettings {
   try {
@@ -198,7 +199,7 @@ export default function App() {
     if (isTauri()) {
       void invoke("set_backdrop_visibility", {
         visible,
-        durationMs: prefersReducedMotion ? 0 : islandTransitionMs,
+        durationMs: prefersReducedMotion ? reducedIslandTransitionMs : islandTransitionMs,
       }).catch(() => {});
     }
     setIslandVisible(visible);
@@ -436,21 +437,19 @@ export default function App() {
 
   return (
     <div className={`app-shell ${browserPreview ? "web-preview" : "tauri-root"} theme-${resolvedTheme}`} style={shellStyle}>
-      <motion.main
+      <main
         ref={islandRef}
-        className={`island state-${visualState}${quitRequested ? " quit-confirming" : ""}${displayedState === "hidden" ? " is-hidden" : ""}`}
+        className={`island state-${visualState}${quitRequested ? " quit-confirming" : ""}${displayedState === "hidden" ? " is-hidden" : ""}${prefersReducedMotion ? " reduced-motion" : ""}`}
         aria-label="DeskAct Adaptive Island"
         aria-hidden={displayedState === "hidden"}
         inert={displayedState === "hidden"}
-        initial={false}
-        animate={displayedState === "hidden" ? "hidden" : "visible"}
-        variants={{ visible: { opacity: 1, y: 0, scale: 1 }, hidden: { opacity: 0, y: -4, scale: 0.97 } }}
-        transition={{ duration: prefersReducedMotion ? 0 : islandTransitionMs / 1000, ease: [0.22, 1, 0.36, 1] }}
-        onAnimationComplete={(definition) => {
-          if (definition === "hidden" && hidePending.current && !browserPreview) {
-            hidePending.current = false;
-            void invoke("dismiss_island").catch(() => {});
-          }
+        style={{ "--island-transition-duration": `${prefersReducedMotion ? reducedIslandTransitionMs : islandTransitionMs}ms` } as CSSProperties}
+        onTransitionEnd={(event) => {
+          if (event.target !== event.currentTarget || !hidePending.current || browserPreview) return;
+          const completedProperty = prefersReducedMotion ? "opacity" : "transform";
+          if (event.propertyName !== completedProperty) return;
+          hidePending.current = false;
+          void invoke("dismiss_island").catch(() => {});
         }}
       >
       <AnimatePresence mode="popLayout" initial={false} onExitComplete={morphWindowToContent}>
@@ -587,7 +586,7 @@ export default function App() {
       )}
       </motion.div>
       </AnimatePresence>
-      </motion.main>
+      </main>
       {browserPreview && <PreviewControls selected={previewState} onSelect={selectPreviewState} />}
     </div>
   );
