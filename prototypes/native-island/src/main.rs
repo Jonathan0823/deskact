@@ -4,225 +4,75 @@
 #[cfg(not(windows))]
 compile_error!("This throwaway probe is Windows-only.");
 
-mod composition_backdrop;
-
 use std::{
+    ffi::c_void,
     mem::zeroed,
     sync::atomic::{AtomicIsize, Ordering},
 };
 
-use composition_backdrop::{CompositionBackdrop, CompositionRuntime};
-
 use windows_sys::Win32::{
-    Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
-    Graphics::{
-        Dwm::DwmSetWindowAttribute,
-        Gdi::{BeginPaint, CreateRoundRectRgn, DeleteObject, EndPaint, PAINTSTRUCT, SetWindowRgn},
+    Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+    Graphics::Gdi::{
+        BeginPaint, CreatePen, CreateRoundRectRgn, CreateSolidBrush, DeleteObject, DrawTextW,
+        EndPaint, FillRect, GetStockObject, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, RoundRect,
+        SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TRANSPARENT,
     },
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::{VK_ESCAPE, VK_F1},
         WindowsAndMessaging::{
             CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-            DispatchMessageW, GWL_STYLE, GWLP_USERDATA, GetClientRect, GetMessageW,
-            GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, LoadCursorW, MSG,
-            PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW,
-            SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
-            SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-            WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-            WNDCLASSW, WS_CAPTION, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-            WS_POPUP, WS_SYSMENU,
+            DispatchMessageW, GWL_STYLE, GWLP_USERDATA, GetMessageW, GetSystemMetrics,
+            GetWindowLongPtrW, GetWindowRect, HTTRANSPARENT, IDC_ARROW, LWA_COLORKEY, LoadCursorW,
+            MB_ICONERROR, MB_OK, MSG, MessageBoxW, PostQuitMessage, RegisterClassW, SM_CXSCREEN,
+            SM_CYSCREEN, SW_HIDE, SW_SHOW, SW_SHOWNA, SWP_FRAMECHANGED, SWP_NOMOVE,
+            SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
+            SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+            TranslateMessage, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_NCCREATE,
+            WM_NCDESTROY, WM_NCHITTEST, WM_PAINT, WNDCLASSW, WS_CAPTION, WS_EX_LAYERED,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX,
+            WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
         },
     },
-};
-
-use windows::{
-    Win32::{
-        Foundation::HWND as D2dHwnd,
-        Graphics::{
-            Direct2D::{
-                Common::{
-                    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
-                    D2D1_PIXEL_FORMAT,
-                },
-                D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-                D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_IMMEDIATELY,
-                D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_ROUNDED_RECT,
-                D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Factory,
-                ID2D1HwndRenderTarget,
-            },
-            DirectWrite::{
-                DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
-                DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-                DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat,
-            },
-            Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
-        },
-    },
-    core::w,
 };
 
 const ISLAND_WIDTH: i32 = 520;
 const ISLAND_HEIGHT: i32 = 112;
 const SETTINGS_WIDTH: i32 = 480;
 const SETTINGS_HEIGHT: i32 = 320;
+const TRANSPARENT_KEY: u32 = 0x00ff00ff;
+const WHITE: u32 = 0x00ffffff;
+
 static ISLAND: AtomicIsize = AtomicIsize::new(0);
 static SETTINGS: AtomicIsize = AtomicIsize::new(0);
 
-struct SurfaceText {
+struct Surface {
+    overlay: HWND,
+    acrylic_state: *mut c_void,
+}
+
+struct OverlayText {
     heading: Vec<u16>,
     instructions: Vec<u16>,
     radius: i32,
-    renderer: Option<Renderer>,
-    _backdrop: Option<CompositionBackdrop>,
 }
 
-struct Renderer {
-    target: ID2D1HwndRenderTarget,
-    heading_format: IDWriteTextFormat,
-    instructions_format: IDWriteTextFormat,
-    brush: windows::Win32::Graphics::Direct2D::ID2D1SolidColorBrush,
-}
-
-impl Renderer {
-    unsafe fn new(hwnd: HWND, width: u32, height: u32) -> windows::core::Result<Self> {
-        let d2d: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-        let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-        let target_properties = D2D1_RENDER_TARGET_PROPERTIES {
-            r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            ..Default::default()
-        };
-        let hwnd_properties = D2D1_HWND_RENDER_TARGET_PROPERTIES {
-            hwnd: D2dHwnd(hwnd),
-            pixelSize: D2D_SIZE_U { width, height },
-            presentOptions: D2D1_PRESENT_OPTIONS_IMMEDIATELY,
-        };
-        let target = d2d.CreateHwndRenderTarget(&target_properties, &hwnd_properties)?;
-        target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-
-        let heading_format = dwrite.CreateTextFormat(
-            w!("Segoe UI Variable Display"),
-            None,
-            DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            18.0,
-            w!("en-us"),
-        )?;
-        heading_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
-        heading_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-        let instructions_format = dwrite.CreateTextFormat(
-            w!("Segoe UI Variable Text"),
-            None,
-            DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            13.0,
-            w!("en-us"),
-        )?;
-        instructions_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
-        instructions_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-        let brush = target.CreateSolidColorBrush(
-            &D2D1_COLOR_F {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 1.0,
-            },
-            None,
-        )?;
-        Ok(Self {
-            target,
-            heading_format,
-            instructions_format,
-            brush,
-        })
-    }
-
-    unsafe fn draw(&self, surface: &SurfaceText, width: f32, height: f32) {
-        self.target.BeginDraw();
-        self.target.Clear(Some(&D2D1_COLOR_F {
-            r: 0.105,
-            g: 0.115,
-            b: 0.14,
-            a: 0.0,
-        }));
-        let bounds = D2D_RECT_F {
-            left: 0.5,
-            top: 0.5,
-            right: width - 0.5,
-            bottom: height - 0.5,
-        };
-        let radius = surface.radius as f32;
-        self.brush.SetColor(&D2D1_COLOR_F {
-            r: 1.0,
-            g: 1.0,
-            b: 1.0,
-            a: 0.22,
-        });
-        self.target.DrawRoundedRectangle(
-            &D2D1_ROUNDED_RECT {
-                rect: bounds,
-                radiusX: radius,
-                radiusY: radius,
-            },
-            &self.brush,
-            1.0,
-            None,
-        );
-        self.brush.SetColor(&D2D1_COLOR_F {
-            r: 1.0,
-            g: 1.0,
-            b: 1.0,
-            a: 0.96,
-        });
-        let heading = &surface.heading[..surface.heading.len().saturating_sub(1)];
-        let instructions = &surface.instructions[..surface.instructions.len().saturating_sub(1)];
-        self.target.DrawText(
-            heading,
-            &self.heading_format,
-            &D2D_RECT_F {
-                left: 28.0,
-                top: 18.0,
-                right: width - 24.0,
-                bottom: 56.0,
-            },
-            &self.brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-            DWRITE_MEASURING_MODE_NATURAL,
-        );
-        self.brush.SetColor(&D2D1_COLOR_F {
-            r: 1.0,
-            g: 1.0,
-            b: 1.0,
-            a: 0.70,
-        });
-        self.target.DrawText(
-            instructions,
-            &self.instructions_format,
-            &D2D_RECT_F {
-                left: 28.0,
-                top: 56.0,
-                right: width - 24.0,
-                bottom: 94.0,
-            },
-            &self.brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-            DWRITE_MEASURING_MODE_NATURAL,
-        );
-        let _ = self.target.EndDraw(None, None);
-    }
+#[cfg_attr(target_env = "msvc", link(name = "DeskActAcrylicShim"))]
+unsafe extern "C" {
+    fn deskact_bootstrap_initialize() -> i32;
+    fn deskact_acrylic_attach(hwnd: HWND, output_state: *mut *mut c_void) -> i32;
+    fn deskact_acrylic_detach(state: *mut c_void);
+    fn deskact_composition_shutdown();
+    fn deskact_bootstrap_shutdown();
 }
 
 fn main() {
     unsafe {
-        let composition = CompositionRuntime::new()
-            .unwrap_or_else(|_| fail("Windows.UI.Composition initialization failed"));
+        check_hresult(
+            deskact_bootstrap_initialize(),
+            "Windows App SDK bootstrap initialization failed",
+        );
+
         let instance = GetModuleHandleW(std::ptr::null());
         if instance.is_null() {
             fail("GetModuleHandleW failed");
@@ -242,41 +92,62 @@ fn main() {
             lpszClassName: class_name.as_ptr(),
         };
         if RegisterClassW(&class) == 0 {
-            fail("RegisterClassW failed");
+            fail("RegisterClassW failed for the backdrop window");
+        }
+
+        let overlay_class_name = wide("DeskAct.NativeIslandOverlay");
+        let overlay_class = WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(overlay_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: instance,
+            hIcon: std::ptr::null_mut(),
+            hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
+            hbrBackground: std::ptr::null_mut(),
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: overlay_class_name.as_ptr(),
+        };
+        if RegisterClassW(&overlay_class) == 0 {
+            fail("RegisterClassW failed for the diagnostic overlay");
         }
 
         let island = create_surface(
             instance,
             &class_name,
+            &overlay_class_name,
             ISLAND_WIDTH,
             ISLAND_HEIGHT,
             ISLAND_HEIGHT / 2,
             "DeskAct · Native island probe",
-            "F1 opens separate Settings. Click away to test inactive host backdrop. Esc quits.",
+            "F1 opens separate Settings. Click away to check Acrylic. Esc quits.",
             true,
-            &composition,
         );
         ISLAND.store(island as isize, Ordering::Relaxed);
 
         let settings = create_surface(
             instance,
             &class_name,
+            &overlay_class_name,
             SETTINGS_WIDTH,
             SETTINGS_HEIGHT,
             24,
             "Settings · Independent native window",
-            "This window has its own HWND and rounded Composition clip. Esc returns to island.",
+            "Separate HWND with its own acrylic material. Esc returns to island.",
             false,
-            &composition,
         );
         SETTINGS.store(settings as isize, Ordering::Relaxed);
 
         ShowWindow(island, SW_SHOW);
+        ShowWindow(surface(&ISLAND).overlay, SW_SHOWNA);
         let mut message: MSG = zeroed();
         while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+
+        deskact_composition_shutdown();
+        deskact_bootstrap_shutdown();
     }
 }
 
@@ -284,13 +155,13 @@ fn main() {
 unsafe fn create_surface(
     instance: HINSTANCE,
     class_name: &[u16],
+    overlay_class_name: &[u16],
     width: i32,
     height: i32,
     radius: i32,
     heading: &str,
     instructions: &str,
     centered: bool,
-    composition: &CompositionRuntime,
 ) -> HWND {
     let title = [0u16];
     let (x, y) = if centered {
@@ -304,12 +175,9 @@ unsafe fn create_surface(
             (GetSystemMetrics(SM_CYSCREEN) - height) / 2 + 72,
         )
     };
-    let text = Box::into_raw(Box::new(SurfaceText {
-        heading: wide(heading),
-        instructions: wide(instructions),
-        radius,
-        renderer: None,
-        _backdrop: None,
+    let surface = Box::into_raw(Box::new(Surface {
+        overlay: std::ptr::null_mut(),
+        acrylic_state: std::ptr::null_mut(),
     }));
     let hwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
@@ -323,46 +191,78 @@ unsafe fn create_surface(
         std::ptr::null_mut(),
         std::ptr::null_mut(),
         instance,
-        text.cast(),
+        surface.cast(),
     );
     if hwnd.is_null() {
-        drop(Box::from_raw(text));
-        fail("CreateWindowExW failed");
+        drop(Box::from_raw(surface));
+        fail("CreateWindowExW failed for the backdrop window");
     }
 
     enforce_chromeless_style(hwnd);
     apply_rounded_region(hwnd, radius);
-    let backdrop = enable_host_backdrop(hwnd);
-    let mut client: RECT = zeroed();
-    if GetClientRect(hwnd, &mut client) == 0 {
-        fail("GetClientRect failed");
-    }
-    let data = &mut *text;
-    data.instructions = wide(if backdrop {
-        "Clipped host backdrop · F1 Settings · click away to test inactive"
-    } else {
-        "Host backdrop unavailable · F1 Settings · Esc quits"
-    });
-    data._backdrop = Some(
-        CompositionBackdrop::attach(
-            composition,
-            windows::Win32::Foundation::HWND(hwnd),
-            client.right as f32,
-            client.bottom as f32,
-            radius as f32,
-        )
-        .unwrap_or_else(|_| fail("Composition host backdrop initialization failed")),
+    check_hresult(
+        deskact_acrylic_attach(hwnd, &mut (*surface).acrylic_state),
+        "DesktopAcrylicController could not attach to the native window",
     );
-    let data = &mut *text;
-    data.renderer = Some(
-        Renderer::new(hwnd, client.right as u32, client.bottom as u32)
-            .unwrap_or_else(|_| fail("Direct2D renderer initialization failed")),
+    (*surface).overlay = create_overlay(
+        instance,
+        overlay_class_name,
+        hwnd,
+        width,
+        height,
+        radius,
+        heading,
+        instructions,
     );
     hwnd
 }
 
+#[allow(clippy::too_many_arguments)]
+unsafe fn create_overlay(
+    instance: HINSTANCE,
+    class_name: &[u16],
+    owner: HWND,
+    width: i32,
+    height: i32,
+    radius: i32,
+    heading: &str,
+    instructions: &str,
+) -> HWND {
+    let mut rect: RECT = zeroed();
+    if GetWindowRect(owner, &mut rect) == 0 {
+        fail("GetWindowRect failed for the diagnostic overlay");
+    }
+    let title = [0u16];
+    let text = Box::into_raw(Box::new(OverlayText {
+        heading: wide(heading),
+        instructions: wide(instructions),
+        radius,
+    }));
+    let overlay = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        class_name.as_ptr(),
+        title.as_ptr(),
+        WS_POPUP,
+        rect.left,
+        rect.top,
+        width,
+        height,
+        owner,
+        std::ptr::null_mut(),
+        instance,
+        text.cast(),
+    );
+    if overlay.is_null() {
+        drop(Box::from_raw(text));
+        fail("CreateWindowExW failed for the diagnostic overlay");
+    }
+    if SetLayeredWindowAttributes(overlay, TRANSPARENT_KEY, 0, LWA_COLORKEY) == 0 {
+        fail("SetLayeredWindowAttributes failed for the diagnostic overlay");
+    }
+    overlay
+}
+
 unsafe fn enforce_chromeless_style(hwnd: HWND) {
-    // Keep the native HWND captionless even if additional style bits are introduced later.
     let mut style = GetWindowLongPtrW(hwnd, GWL_STYLE);
     style &= !((WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX) as isize);
     SetWindowLongPtrW(hwnd, GWL_STYLE, style);
@@ -377,33 +277,11 @@ unsafe fn enforce_chromeless_style(hwnd: HWND) {
     );
 }
 
-unsafe fn enable_host_backdrop(hwnd: HWND) -> bool {
-    const DWMWA_USE_HOSTBACKDROPBRUSH: u32 = 17;
-    const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
-    const DWMSBT_NONE: u32 = 1;
-    let enabled: BOOL = 1;
-    let backdrop_result = DwmSetWindowAttribute(
-        hwnd,
-        DWMWA_USE_HOSTBACKDROPBRUSH,
-        (&enabled as *const BOOL).cast(),
-        size_of::<BOOL>() as u32,
-    );
-    let none = DWMSBT_NONE;
-    let _ = DwmSetWindowAttribute(
-        hwnd,
-        DWMWA_SYSTEMBACKDROP_TYPE,
-        (&none as *const u32).cast(),
-        size_of::<u32>() as u32,
-    );
-    backdrop_result >= 0
-}
-
 unsafe fn apply_rounded_region(hwnd: HWND, radius: i32) {
     let mut rect: RECT = zeroed();
     if GetWindowRect(hwnd, &mut rect) == 0 {
         return;
     }
-    // SetWindowRgn coordinates are relative to the outer window bounds.
     let width = rect.right - rect.left;
     let height = rect.bottom - rect.top;
     let diameter = (radius * 2).min(width.min(height));
@@ -428,25 +306,19 @@ unsafe extern "system" fn window_proc(
         WM_ERASEBKGND => 1,
         WM_PAINT => {
             let mut paint: PAINTSTRUCT = zeroed();
-            let dc = BeginPaint(hwnd, &mut paint);
-            let data = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut SurfaceText;
-            if !dc.is_null() && !data.is_null() {
-                let mut client: RECT = zeroed();
-                let _ = GetClientRect(hwnd, &mut client);
-                if let Some(renderer) = (*data).renderer.as_ref() {
-                    renderer.draw(&*data, client.right as f32, client.bottom as f32);
-                }
-            }
+            BeginPaint(hwnd, &mut paint);
             EndPaint(hwnd, &paint);
             0
         }
         WM_KEYDOWN if wparam as u32 == VK_F1 as u32 && hwnd == handle(&ISLAND) => {
             let settings = handle(&SETTINGS);
             ShowWindow(settings, SW_SHOW);
+            ShowWindow(surface(&SETTINGS).overlay, SW_SHOWNA);
             let _ = SetForegroundWindow(settings);
             0
         }
         WM_KEYDOWN if wparam as u32 == VK_ESCAPE as u32 && hwnd == handle(&SETTINGS) => {
+            ShowWindow(surface(&SETTINGS).overlay, SW_HIDE);
             ShowWindow(hwnd, SW_HIDE);
             let island = handle(&ISLAND);
             let _ = SetForegroundWindow(island);
@@ -457,6 +329,7 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_CLOSE if hwnd == handle(&SETTINGS) => {
+            ShowWindow(surface(&SETTINGS).overlay, SW_HIDE);
             ShowWindow(hwnd, SW_HIDE);
             0
         }
@@ -473,9 +346,15 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_NCDESTROY => {
-            let text = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut SurfaceText;
-            if !text.is_null() {
-                drop(Box::from_raw(text));
+            let data = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Surface;
+            if !data.is_null() {
+                if !(*data).overlay.is_null() {
+                    DestroyWindow((*data).overlay);
+                }
+                if !(*data).acrylic_state.is_null() {
+                    deskact_acrylic_detach((*data).acrylic_state);
+                }
+                drop(Box::from_raw(data));
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             }
             DefWindowProcW(hwnd, message, wparam, lparam)
@@ -484,8 +363,136 @@ unsafe extern "system" fn window_proc(
     }
 }
 
+unsafe extern "system" fn overlay_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match message {
+        WM_NCCREATE => {
+            let create = &*(lparam as *const CREATESTRUCTW);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize);
+            1
+        }
+        WM_NCHITTEST => HTTRANSPARENT as LRESULT,
+        WM_ERASEBKGND => {
+            fill_transparency_key(wparam as _, hwnd);
+            1
+        }
+        WM_PAINT => {
+            let mut paint: PAINTSTRUCT = zeroed();
+            let dc = BeginPaint(hwnd, &mut paint);
+            if !dc.is_null() {
+                fill_transparency_key(dc, hwnd);
+                let data = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut OverlayText;
+                if !data.is_null() {
+                    draw_overlay(dc, &*data, hwnd);
+                }
+            }
+            EndPaint(hwnd, &paint);
+            0
+        }
+        WM_NCDESTROY => {
+            let data = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut OverlayText;
+            if !data.is_null() {
+                drop(Box::from_raw(data));
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            }
+            DefWindowProcW(hwnd, message, wparam, lparam)
+        }
+        _ => DefWindowProcW(hwnd, message, wparam, lparam),
+    }
+}
+
+unsafe fn fill_transparency_key(dc: windows_sys::Win32::Graphics::Gdi::HDC, hwnd: HWND) {
+    let mut rect: RECT = zeroed();
+    let _ = windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect);
+    let brush = CreateSolidBrush(TRANSPARENT_KEY);
+    if !brush.is_null() {
+        FillRect(dc, &rect, brush);
+        let _ = DeleteObject(brush);
+    }
+}
+
+unsafe fn draw_overlay(dc: windows_sys::Win32::Graphics::Gdi::HDC, text: &OverlayText, hwnd: HWND) {
+    let mut client: RECT = zeroed();
+    let _ = windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client);
+    SetBkMode(dc, TRANSPARENT as i32);
+    SetTextColor(dc, WHITE);
+
+    let previous_font = SelectObject(
+        dc,
+        GetStockObject(windows_sys::Win32::Graphics::Gdi::DEFAULT_GUI_FONT),
+    );
+    let heading = &text.heading[..text.heading.len().saturating_sub(1)];
+    let instructions = &text.instructions[..text.instructions.len().saturating_sub(1)];
+    let mut heading_rect = RECT {
+        left: 28,
+        top: 18,
+        right: client.right - 24,
+        bottom: 54,
+    };
+    DrawTextW(
+        dc,
+        heading.as_ptr(),
+        heading.len() as i32,
+        &mut heading_rect,
+        0x00000001 | 0x00000020,
+    );
+    let mut instructions_rect = RECT {
+        left: 28,
+        top: 58,
+        right: client.right - 24,
+        bottom: 96,
+    };
+    DrawTextW(
+        dc,
+        instructions.as_ptr(),
+        instructions.len() as i32,
+        &mut instructions_rect,
+        0x00000001 | 0x00000020,
+    );
+
+    let pen = CreatePen(PS_SOLID, 1, WHITE);
+    if !pen.is_null() {
+        let previous_pen = SelectObject(dc, pen);
+        let previous_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        let _ = RoundRect(
+            dc,
+            1,
+            1,
+            client.right - 1,
+            client.bottom - 1,
+            text.radius * 2,
+            text.radius * 2,
+        );
+        SelectObject(dc, previous_brush);
+        SelectObject(dc, previous_pen);
+        let _ = DeleteObject(pen);
+    }
+    SelectObject(dc, previous_font);
+}
+
+fn surface(value: &AtomicIsize) -> &'static mut Surface {
+    let hwnd = handle(value);
+    unsafe {
+        let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Surface;
+        if pointer.is_null() {
+            fail("native surface state was not initialized");
+        }
+        &mut *pointer
+    }
+}
+
 fn handle(value: &AtomicIsize) -> HWND {
     value.load(Ordering::Relaxed) as HWND
+}
+
+fn check_hresult(result: i32, message: &str) {
+    if result < 0 {
+        fail(&format!("{message} (HRESULT 0x{:08X})", result as u32));
+    }
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -494,5 +501,15 @@ fn wide(value: &str) -> Vec<u16> {
 
 fn fail(message: &str) -> ! {
     eprintln!("native island probe: {message}");
+    let title = wide("Native Island Probe");
+    let message = wide(message);
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
     std::process::exit(1);
 }

@@ -14,16 +14,30 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: microsoft/setup-msbuild@v2
       - uses: dtolnay/rust-toolchain@stable
+      - name: Build Windows App SDK acrylic shim
+        run: msbuild prototypes/native-island/acrylic-shim/DeskActAcrylicShim.vcxproj /restore /p:Configuration=Release /p:Platform=x64
       - name: Check formatting
         run: cargo fmt --manifest-path prototypes/native-island/Cargo.toml -- --check
       - name: Lint probe
         run: cargo clippy --manifest-path prototypes/native-island/Cargo.toml --target x86_64-pc-windows-msvc --locked -- -D warnings
       - name: Build probe
         run: cargo build --manifest-path prototypes/native-island/Cargo.toml --release --locked --target x86_64-pc-windows-msvc
+      - name: Stage runnable probe
+        shell: pwsh
+        run: |
+          $stage = "prototypes/native-island/artifact"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item "prototypes/native-island/target/x86_64-pc-windows-msvc/release/deskact-native-island-probe.exe" $stage
+          Copy-Item "prototypes/native-island/acrylic-shim/bin/x64/Release/DeskActAcrylicShim.dll" $stage
+          $bootstrapper = Get-ChildItem "$env:USERPROFILE/.nuget/packages" -Recurse -Filter "Microsoft.WindowsAppRuntime.Bootstrap.dll" | Where-Object { $_.FullName -match "\\x64\\" } | Select-Object -First 1
+          if (-not $bootstrapper) { throw "Windows App SDK x64 bootstrapper DLL was not restored" }
+          Copy-Item $bootstrapper.FullName $stage
+          Copy-Item "prototypes/native-island/README.md" $stage
       - uses: actions/upload-artifact@v7
         with:
           name: deskact-native-island-probe-windows-x64
-          path: prototypes/native-island/target/x86_64-pc-windows-msvc/release/deskact-native-island-probe.exe
+          path: prototypes/native-island/artifact/*
           if-no-files-found: error
           retention-days: 14
