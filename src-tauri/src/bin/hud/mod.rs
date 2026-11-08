@@ -2,6 +2,8 @@ mod shortcuts;
 mod tasks;
 mod tray;
 mod window_behavior;
+#[cfg(windows)]
+mod windows_frame;
 
 use shortcuts::{ShortcutState, ShortcutStatus};
 use tasks::TaskHub;
@@ -49,6 +51,15 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            #[cfg(windows)]
+            {
+                let window = app.get_webview_window("main").ok_or_else(|| {
+                    std::io::Error::other("DeskAct's island window is unavailable")
+                })?;
+                let hwnd = window.hwnd()?;
+                // setup runs on the HWND's owning event-loop thread, before show.
+                unsafe { windows_frame::install(hwnd.0)? };
+            }
             let state = app.state::<ShortcutState>();
             shortcuts::install_shortcut(app.handle(), state.inner());
             tray::install(app)?;

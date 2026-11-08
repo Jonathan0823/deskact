@@ -9,13 +9,9 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
 #[cfg(windows)]
-use windows_sys::Win32::Graphics::{
-    Dwm::{
-        DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
-        DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-        DwmSetWindowAttribute,
-    },
-    Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn},
+use windows_sys::Win32::Graphics::Dwm::{
+    DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    DwmSetWindowAttribute,
 };
 
 #[derive(Default)]
@@ -104,8 +100,9 @@ pub async fn morph_window(
         .map_err(|_| "Could not read DeskAct's current position".to_owned())?;
     let center_x = position.x + (start.width as i32 / 2);
     let top = position.y;
+    // Set the shape first; the HWND resize hook keeps it in sync at every frame.
+    update_rounded_window_region(&window, corner_radius, scale)?;
     if start == target {
-        update_rounded_window_region(&window, corner_radius, scale)?;
         return Ok(());
     }
     if reduced_motion {
@@ -118,7 +115,6 @@ pub async fn morph_window(
                 top,
             ))
             .map_err(|_| "Could not anchor DeskAct after resize".to_owned())?;
-        update_rounded_window_region(&window, corner_radius, scale)?;
         return Ok(());
     }
 
@@ -144,7 +140,6 @@ pub async fn morph_window(
         window
             .set_position(PhysicalPosition::new(center_x - width as i32 / 2, top))
             .map_err(|_| "Could not anchor DeskAct during resize".to_owned())?;
-        update_rounded_window_region(&window, corner_radius, scale)?;
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
     if app
@@ -162,7 +157,6 @@ pub async fn morph_window(
                 top,
             ))
             .map_err(|_| "Could not anchor DeskAct after resize".to_owned())?;
-        update_rounded_window_region(&window, corner_radius, scale)?;
     }
     Ok(())
 }
@@ -303,58 +297,24 @@ fn position_on_foreground_monitor(window: &WebviewWindow, foreground: isize) {
 #[cfg(not(windows))]
 fn position_on_foreground_monitor(_window: &WebviewWindow, _foreground: isize) {}
 
+#[cfg(windows)]
 fn update_rounded_window_region(
     window: &WebviewWindow,
-    corner_radius: f64,
-    scale: f64,
-) -> Result<(), String> {
-    let size = window
-        .outer_size()
-        .map_err(|_| "Could not read DeskAct's outer window size".to_owned())?;
-    set_rounded_window_region(window, size.width, size.height, corner_radius, scale)
-}
-
-#[cfg(windows)]
-fn set_rounded_window_region(
-    window: &WebviewWindow,
-    width: u32,
-    height: u32,
     corner_radius: f64,
     scale: f64,
 ) -> Result<(), String> {
     let hwnd = window
         .hwnd()
         .map_err(|_| "Could not access DeskAct's native window handle".to_owned())?;
-    let ellipse =
-        ((corner_radius.max(0.0) * scale * 2.0).round() as i32).clamp(1, width.min(height) as i32);
-    // Ask DWM to round its own backdrop too; the HRGN below keeps the larger, animated island radius.
-    let corner_preference = DWMWCP_ROUND;
-    unsafe {
-        let _ = DwmSetWindowAttribute(
-            hwnd.0,
-            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-            (&corner_preference as *const i32).cast(),
-            std::mem::size_of::<i32>() as u32,
-        );
-    }
-    let region =
-        unsafe { CreateRoundRectRgn(0, 0, width as i32 + 1, height as i32 + 1, ellipse, ellipse) };
-    if region.is_null() {
-        return Err("Could not create DeskAct's rounded window region".to_owned());
-    }
-
-    if unsafe { SetWindowRgn(hwnd.0, region, 1) } == 0 {
-        unsafe { DeleteObject(region) };
-        return Err("Could not apply DeskAct's rounded window region".to_owned());
-    }
-    Ok(())
+    let radius = (corner_radius.max(0.0) * scale).round() as usize;
+    // SendMessage synchronizes with the guard on the native event-loop thread.
+    unsafe { super::windows_frame::set_corner_radius(hwnd.0, radius) }
+        .map_err(|error| format!("Could not update DeskAct's rounded window region: {error}"))
 }
 
 #[cfg(not(windows))]
-fn set_rounded_window_region(
+fn update_rounded_window_region(
     _window: &WebviewWindow,
-    _width: u32,
-    _height: u32,
     _corner_radius: f64,
     _scale: f64,
 ) -> Result<(), String> {
