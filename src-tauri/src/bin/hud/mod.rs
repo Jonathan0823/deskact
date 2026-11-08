@@ -11,7 +11,7 @@ use shortcuts::{ShortcutState, ShortcutStatus};
 use tasks::TaskHub;
 use tauri::{Emitter, Manager};
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AppearanceSettings {
     theme: String,
