@@ -31,9 +31,7 @@ jobs:
           New-Item -ItemType Directory -Force $stage | Out-Null
           Copy-Item "prototypes/native-island/target/x86_64-pc-windows-msvc/release/deskact-native-island-probe.exe" $stage
           Copy-Item "prototypes/native-island/acrylic-shim/bin/x64/Release/DeskActAcrylicShim.dll" $stage
-          $bootstrapper = Get-ChildItem "$env:USERPROFILE/.nuget/packages" -Recurse -Filter "Microsoft.WindowsAppRuntime.Bootstrap.dll" | Where-Object { $_.FullName -match "\\x64\\" } | Select-Object -First 1
-          if (-not $bootstrapper) { throw "Windows App SDK x64 bootstrapper DLL was not restored" }
-          Copy-Item $bootstrapper.FullName $stage
+          Copy-Item "prototypes/native-island/acrylic-shim/bin/x64/Release/Microsoft.WindowsAppRuntime.Bootstrap.dll" $stage
           Copy-Item "prototypes/native-island/README.md" $stage
       - uses: actions/upload-artifact@v7
         with:
