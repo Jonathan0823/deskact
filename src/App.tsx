@@ -51,6 +51,7 @@ type ShortcutStatus = {
 };
 
 const appearanceStorageKey = "deskact-appearance-v1";
+const islandTransitionMs = 180;
 const defaultAppearance: AppearanceSettings = { theme: "light", opacity: 48, micaEnabled: true };
 function readAppearance(): AppearanceSettings {
   try {
@@ -152,7 +153,7 @@ export default function App() {
   const requestInput = useRef<HTMLInputElement>(null);
   const islandRef = useRef<HTMLElement>(null);
   const taskRef = useRef<TaskSnapshot | null>(null);
-  const hideTimer = useRef<number | null>(null);
+  const hidePending = useRef(false);
   const browserPreview = import.meta.env.DEV && !isTauri();
   const prefersReducedMotion = useReducedMotion();
   const resolvedTheme = appearance.theme === "system" ? (systemPrefersDark ? "dark" : "light") : appearance.theme;
@@ -193,18 +194,27 @@ export default function App() {
     void invoke("set_backdrop_material", { enabled: appearance.micaEnabled }).catch(() => {});
   }, [appearance.micaEnabled]);
 
+  function setIslandVisibility(visible: boolean) {
+    if (isTauri()) {
+      void invoke("set_backdrop_visibility", {
+        visible,
+        durationMs: prefersReducedMotion ? 0 : islandTransitionMs,
+      }).catch(() => {});
+    }
+    setIslandVisible(visible);
+  }
+
   function dismissIsland() {
     if (browserPreview) {
       setPreviewState("hidden");
       return;
     }
-    setIslandVisible(false);
-    if (hideTimer.current !== null) window.clearTimeout(hideTimer.current);
-    const delay = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 240;
-    hideTimer.current = window.setTimeout(() => {
-      void invoke("dismiss_island");
-      hideTimer.current = null;
-    }, delay);
+    if (displayedState === "hidden") {
+      void invoke("dismiss_island").catch(() => {});
+      return;
+    }
+    hidePending.current = true;
+    setIslandVisibility(false);
   }
 
   function morphWindowToContent() {
@@ -290,14 +300,19 @@ export default function App() {
       else listeners.push(unlisten);
     });
     void listen("deskact://open-settings", () => {
-      setIslandVisible(true);
+      hidePending.current = false;
+      setIslandVisibility(true);
       setState("settings");
       void refreshShortcut();
     }).then((unlisten) => {
       if (disposed) unlisten();
       else listeners.push(unlisten);
     });
-    void listen("deskact://quit-requested", () => setQuitRequested(true)).then((unlisten) => {
+    void listen("deskact://quit-requested", () => {
+      hidePending.current = false;
+      setIslandVisibility(true);
+      setQuitRequested(true);
+    }).then((unlisten) => {
       if (disposed) unlisten();
       else listeners.push(unlisten);
     });
@@ -342,11 +357,8 @@ export default function App() {
   }
 
   async function revealDeskAct() {
-    if (hideTimer.current !== null) {
-      window.clearTimeout(hideTimer.current);
-      hideTimer.current = null;
-    }
-    setIslandVisible(true);
+    hidePending.current = false;
+    setIslandVisibility(true);
     const current = await refreshCurrentTask();
     if (isActiveTask(current)) {
       setState("working");
@@ -424,7 +436,23 @@ export default function App() {
 
   return (
     <div className={`app-shell ${browserPreview ? "web-preview" : "tauri-root"} theme-${resolvedTheme}`} style={shellStyle}>
-      <main ref={islandRef} className={`island state-${visualState}${quitRequested ? " quit-confirming" : ""}${displayedState === "hidden" ? " is-hidden" : ""}`} aria-label="DeskAct Adaptive Island" aria-hidden={displayedState === "hidden"} inert={displayedState === "hidden"}>
+      <motion.main
+        ref={islandRef}
+        className={`island state-${visualState}${quitRequested ? " quit-confirming" : ""}${displayedState === "hidden" ? " is-hidden" : ""}`}
+        aria-label="DeskAct Adaptive Island"
+        aria-hidden={displayedState === "hidden"}
+        inert={displayedState === "hidden"}
+        initial={false}
+        animate={displayedState === "hidden" ? "hidden" : "visible"}
+        variants={{ visible: { opacity: 1, y: 0, scale: 1 }, hidden: { opacity: 0, y: -4, scale: 0.97 } }}
+        transition={{ duration: prefersReducedMotion ? 0 : islandTransitionMs / 1000, ease: [0.22, 1, 0.36, 1] }}
+        onAnimationComplete={(definition) => {
+          if (definition === "hidden" && hidePending.current && !browserPreview) {
+            hidePending.current = false;
+            void invoke("dismiss_island").catch(() => {});
+          }
+        }}
+      >
       <AnimatePresence mode="popLayout" initial={false} onExitComplete={morphWindowToContent}>
       <motion.div
         key={contentState}
@@ -559,7 +587,7 @@ export default function App() {
       )}
       </motion.div>
       </AnimatePresence>
-      </main>
+      </motion.main>
       {browserPreview && <PreviewControls selected={previewState} onSelect={selectPreviewState} />}
     </div>
   );

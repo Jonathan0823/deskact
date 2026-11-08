@@ -43,6 +43,13 @@ fn open_window(app: &AppHandle, event: &str) {
         return;
     };
 
+    #[cfg(windows)]
+    if !window.is_visible().unwrap_or(false)
+        && let Ok(hwnd) = window.hwnd()
+    {
+        super::windows_backdrop::prepare_for_show(hwnd.0);
+    }
+
     if !window.is_focused().unwrap_or(false)
         && let Some(hwnd) = foreground_window()
     {

@@ -43,6 +43,7 @@ pub fn run() {
             yield_focus,
             morph_island_window,
             set_backdrop_material,
+            set_backdrop_visibility,
             quit_application,
             dismiss_island
         ])
@@ -109,11 +110,32 @@ fn set_backdrop_material(window: tauri::WebviewWindow, enabled: bool) -> Result<
             .hwnd()
             .map_err(|_| "Could not access DeskAct's native window handle".to_owned())?;
         let radius = windows_frame::corner_radius(hwnd.0);
-        return unsafe { windows_backdrop::set_material(hwnd.0, enabled, radius) };
+        let visible = window.is_visible().unwrap_or(false);
+        return unsafe { windows_backdrop::set_material(hwnd.0, enabled, visible, radius) };
     }
     #[cfg(not(windows))]
     {
         let _ = (window, enabled);
+        Ok(())
+    }
+}
+
+#[tauri::command]
+fn set_backdrop_visibility(
+    window: tauri::WebviewWindow,
+    visible: bool,
+    duration_ms: u32,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let hwnd = window
+            .hwnd()
+            .map_err(|_| "Could not access DeskAct's native window handle".to_owned())?;
+        return windows_backdrop::animate_visibility(hwnd.0, visible, duration_ms);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, visible, duration_ms);
         Ok(())
     }
 }

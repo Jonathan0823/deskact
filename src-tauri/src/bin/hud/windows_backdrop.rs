@@ -7,10 +7,11 @@
 use std::{cell::RefCell, mem::size_of};
 
 use windows::{
+    Foundation::TimeSpan,
     System::{DispatcherQueue, DispatcherQueueController},
     UI::Composition::{
         CompositionRoundedRectangleGeometry, Compositor, ContainerVisual,
-        Desktop::DesktopWindowTarget, SpriteVisual,
+        Desktop::DesktopWindowTarget, ScalarKeyFrameAnimation, SpriteVisual,
     },
     Win32::{
         Foundation::HWND,
@@ -20,7 +21,7 @@ use windows::{
             RoUninitialize,
         },
     },
-    core::{Interface, Result},
+    core::{HSTRING, Interface, Result},
 };
 use windows_numerics::Vector2;
 use windows_sys::Win32::{
@@ -42,6 +43,7 @@ thread_local! {
 struct BackdropState {
     runtime: Option<CompositionRuntime>,
     surface: Option<BackdropSurface>,
+    enabled: bool,
 }
 
 struct Apartment;
@@ -112,6 +114,39 @@ impl BackdropSurface {
         })
     }
 
+    fn prepare_for_show(&self) -> Result<()> {
+        let property = HSTRING::from("Opacity");
+        self.root.StopAnimation(&property)?;
+        self.root.SetOpacity(0.0)?;
+        self.root.SetIsVisible(true)
+    }
+
+    fn animate_visibility(&self, visible: bool, duration_ms: u32) -> Result<()> {
+        let property = HSTRING::from("Opacity");
+        let current = self.root.Opacity()?;
+        self.root.StopAnimation(&property)?;
+        self.root.SetOpacity(current)?;
+        self.root.SetIsVisible(true)?;
+        if duration_ms == 0 {
+            return self.root.SetOpacity(if visible { 1.0 } else { 0.0 });
+        }
+        let compositor = self.root.Compositor()?;
+        let easing = compositor.CreateCubicBezierEasingFunction(
+            Vector2 { X: 0.22, Y: 1.0 },
+            Vector2 { X: 0.36, Y: 1.0 },
+        )?;
+        let animation: ScalarKeyFrameAnimation = compositor.CreateScalarKeyFrameAnimation()?;
+        animation.SetDuration(TimeSpan {
+            Duration: i64::from(duration_ms) * 10_000,
+        })?;
+        animation.InsertKeyFrameWithEasingFunction(
+            1.0,
+            if visible { 1.0 } else { 0.0 },
+            &easing,
+        )?;
+        self.root.StartAnimation(&property, &animation)
+    }
+
     fn resize(&self, width: i32, height: i32, radius: usize, dpi: u32) -> Result<()> {
         // Composition visual coordinates are DIPs; HWND dimensions and corner radius are pixels.
         let scale = (dpi.max(96) as f32) / 96.0;
@@ -143,12 +178,14 @@ impl Drop for BackdropSurface {
 pub unsafe fn set_material(
     hwnd: NativeHwnd,
     enabled: bool,
+    window_visible: bool,
     radius: usize,
 ) -> std::result::Result<(), String> {
     // Never leave DWM's rectangular system backdrop behind the composition visual.
     let _ = unsafe { set_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE) };
     if !enabled {
-        STATE.with_borrow(|state| {
+        STATE.with_borrow_mut(|state| {
+            state.enabled = false;
             if let Some(surface) = &state.surface {
                 let _ = surface.root.SetIsVisible(false);
             }
@@ -183,11 +220,22 @@ pub unsafe fn set_material(
                 radius,
                 unsafe { GetDpiForWindow(hwnd) },
             )?;
-            surface.root.SetIsVisible(true)
+            surface
+                .root
+                .SetOpacity(if window_visible { 1.0 } else { 0.0 })?;
+            surface.root.SetIsVisible(true)?;
+            state.enabled = true;
+            Ok(())
         })();
         result.map_err(|error| format!("Could not enable the clipped Windows glass layer: {error}"))
     });
     if result.is_err() {
+        STATE.with_borrow_mut(|state| {
+            state.enabled = false;
+            if let Some(surface) = &state.surface {
+                let _ = surface.root.SetIsVisible(false);
+            }
+        });
         let _ = unsafe { set_attribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, 0) };
     }
     result
@@ -216,10 +264,46 @@ unsafe fn set_attribute(
     }
 }
 
+/// Reset the native backdrop before the previously hidden HWND is shown.
+pub fn prepare_for_show(hwnd: NativeHwnd) {
+    STATE.with(|cell| {
+        if let Ok(state) = cell.try_borrow()
+            && state.enabled
+            && let Some(surface) = &state.surface
+            && surface.hwnd == hwnd
+        {
+            let _ = surface.prepare_for_show();
+        }
+    });
+}
+
+/// Animate the native backdrop in sync with the WebView's show/hide transition.
+pub fn animate_visibility(
+    hwnd: NativeHwnd,
+    visible: bool,
+    duration_ms: u32,
+) -> std::result::Result<(), String> {
+    STATE.with_borrow(|state| {
+        if !state.enabled {
+            return Ok(());
+        }
+        let Some(surface) = &state.surface else {
+            return Ok(());
+        };
+        if surface.hwnd != hwnd {
+            return Err("Composition backdrop belongs to another window".to_owned());
+        }
+        surface
+            .animate_visibility(visible, duration_ms)
+            .map_err(|error| format!("Could not animate the native glass layer: {error}"))
+    })
+}
+
 /// Update the clipped visual before the HWND commits a native resize.
 pub fn resize(hwnd: NativeHwnd, width: i32, height: i32, radius: usize) {
     STATE.with(|cell| {
         if let Ok(state) = cell.try_borrow()
+            && state.enabled
             && let Some(surface) = &state.surface
             && surface.hwnd == hwnd
         {
