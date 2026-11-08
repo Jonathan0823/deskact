@@ -4,29 +4,34 @@
 #[cfg(not(windows))]
 compile_error!("This throwaway probe is Windows-only.");
 
+mod composition_backdrop;
+
 use std::{
     mem::zeroed,
     sync::atomic::{AtomicIsize, Ordering},
 };
 
+use composition_backdrop::{CompositionBackdrop, CompositionRuntime};
+
 use windows_sys::Win32::{
     Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::{
-        Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute},
+        Dwm::DwmSetWindowAttribute,
         Gdi::{BeginPaint, CreateRoundRectRgn, DeleteObject, EndPaint, PAINTSTRUCT, SetWindowRgn},
     },
-    System::LibraryLoader::{GetModuleHandleW, GetProcAddress},
+    System::LibraryLoader::GetModuleHandleW,
     UI::{
-        Controls::MARGINS,
         Input::KeyboardAndMouse::{VK_ESCAPE, VK_F1},
         WindowsAndMessaging::{
             CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-            DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetSystemMetrics,
-            GetWindowLongPtrW, GetWindowRect, IDC_ARROW, LoadCursorW, MSG, PostQuitMessage,
-            RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SetForegroundWindow,
-            SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
-            WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WNDCLASSW, WS_EX_TOOLWINDOW,
-            WS_EX_TOPMOST, WS_POPUP,
+            DispatchMessageW, GWL_STYLE, GWLP_USERDATA, GetClientRect, GetMessageW,
+            GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, LoadCursorW, MSG,
+            PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW,
+            SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+            SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+            WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+            WNDCLASSW, WS_CAPTION, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+            WS_POPUP, WS_SYSMENU,
         },
     },
 };
@@ -65,29 +70,12 @@ const SETTINGS_HEIGHT: i32 = 320;
 static ISLAND: AtomicIsize = AtomicIsize::new(0);
 static SETTINGS: AtomicIsize = AtomicIsize::new(0);
 
-#[repr(C)]
-struct AccentPolicy {
-    state: u32,
-    flags: u32,
-    tint: u32,
-    animation_id: u32,
-}
-
-#[repr(C)]
-struct WindowCompositionAttributeData {
-    attribute: u32,
-    data: *mut AccentPolicy,
-    size: usize,
-}
-
-type SetWindowCompositionAttributeFn =
-    unsafe extern "system" fn(HWND, *mut WindowCompositionAttributeData) -> BOOL;
-
 struct SurfaceText {
     heading: Vec<u16>,
     instructions: Vec<u16>,
     radius: i32,
     renderer: Option<Renderer>,
+    _backdrop: Option<CompositionBackdrop>,
 }
 
 struct Renderer {
@@ -162,7 +150,7 @@ impl Renderer {
             r: 0.105,
             g: 0.115,
             b: 0.14,
-            a: 0.38,
+            a: 0.0,
         }));
         let bounds = D2D_RECT_F {
             left: 0.5,
@@ -233,6 +221,8 @@ impl Renderer {
 
 fn main() {
     unsafe {
+        let composition = CompositionRuntime::new()
+            .unwrap_or_else(|_| fail("Windows.UI.Composition initialization failed"));
         let instance = GetModuleHandleW(std::ptr::null());
         if instance.is_null() {
             fail("GetModuleHandleW failed");
@@ -262,8 +252,9 @@ fn main() {
             ISLAND_HEIGHT,
             ISLAND_HEIGHT / 2,
             "DeskAct · Native island probe",
-            "F1 opens separate Settings. Click elsewhere to test inactive Acrylic. Esc quits.",
+            "F1 opens separate Settings. Click away to test inactive host backdrop. Esc quits.",
             true,
+            &composition,
         );
         ISLAND.store(island as isize, Ordering::Relaxed);
 
@@ -274,8 +265,9 @@ fn main() {
             SETTINGS_HEIGHT,
             24,
             "Settings · Independent native window",
-            "This window has its own HWND and fixed size. Esc returns to the island.",
+            "This window has its own HWND and rounded Composition clip. Esc returns to island.",
             false,
+            &composition,
         );
         SETTINGS.store(settings as isize, Ordering::Relaxed);
 
@@ -298,6 +290,7 @@ unsafe fn create_surface(
     heading: &str,
     instructions: &str,
     centered: bool,
+    composition: &CompositionRuntime,
 ) -> HWND {
     let title = [0u16];
     let (x, y) = if centered {
@@ -316,6 +309,7 @@ unsafe fn create_surface(
         instructions: wide(instructions),
         radius,
         renderer: None,
+        _backdrop: None,
     }));
     let hwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
@@ -336,18 +330,29 @@ unsafe fn create_surface(
         fail("CreateWindowExW failed");
     }
 
-    let acrylic_api_applied = apply_acrylic(hwnd);
-    let data = &mut *text;
-    data.instructions = wide(if acrylic_api_applied {
-        "Native Acrylic API applied · F1 Settings · click away to test inactive"
-    } else {
-        "Native Acrylic API unavailable · F1 Settings · Esc quits"
-    });
+    enforce_chromeless_style(hwnd);
     apply_rounded_region(hwnd, radius);
+    let backdrop = enable_host_backdrop(hwnd);
     let mut client: RECT = zeroed();
     if GetClientRect(hwnd, &mut client) == 0 {
         fail("GetClientRect failed");
     }
+    let data = &mut *text;
+    data.instructions = wide(if backdrop {
+        "Clipped host backdrop · F1 Settings · click away to test inactive"
+    } else {
+        "Host backdrop unavailable · F1 Settings · Esc quits"
+    });
+    data._backdrop = Some(
+        CompositionBackdrop::attach(
+            composition,
+            windows::Win32::Foundation::HWND(hwnd),
+            client.right as f32,
+            client.bottom as f32,
+            radius as f32,
+        )
+        .unwrap_or_else(|_| fail("Composition host backdrop initialization failed")),
+    );
     let data = &mut *text;
     data.renderer = Some(
         Renderer::new(hwnd, client.right as u32, client.bottom as u32)
@@ -356,45 +361,41 @@ unsafe fn create_surface(
     hwnd
 }
 
-unsafe fn apply_acrylic(hwnd: HWND) -> bool {
-    // Use the older composition accent material, not DWMSBT_TRANSIENTWINDOW.
-    // This is the path Wisp uses for Acrylic that must remain visible while inactive.
+unsafe fn enforce_chromeless_style(hwnd: HWND) {
+    // Keep the native HWND captionless even if additional style bits are introduced later.
+    let mut style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    style &= !((WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX) as isize);
+    SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+    let _ = SetWindowPos(
+        hwnd,
+        std::ptr::null_mut(),
+        0,
+        0,
+        0,
+        0,
+        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER,
+    );
+}
+
+unsafe fn enable_host_backdrop(hwnd: HWND) -> bool {
+    const DWMWA_USE_HOSTBACKDROPBRUSH: u32 = 17;
     const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
     const DWMSBT_NONE: u32 = 1;
+    let enabled: BOOL = 1;
+    let backdrop_result = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_USE_HOSTBACKDROPBRUSH,
+        (&enabled as *const BOOL).cast(),
+        size_of::<BOOL>() as u32,
+    );
+    let none = DWMSBT_NONE;
     let _ = DwmSetWindowAttribute(
         hwnd,
         DWMWA_SYSTEMBACKDROP_TYPE,
-        (&DWMSBT_NONE as *const u32).cast(),
+        (&none as *const u32).cast(),
         size_of::<u32>() as u32,
     );
-    let margins = MARGINS {
-        cxLeftWidth: 0,
-        cxRightWidth: 0,
-        cyTopHeight: 0,
-        cyBottomHeight: 0,
-    };
-    let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
-
-    let user32 = wide("user32.dll");
-    let module = GetModuleHandleW(user32.as_ptr());
-    if module.is_null() {
-        return false;
-    }
-    let proc = GetProcAddress(module, c"SetWindowCompositionAttribute".as_ptr().cast());
-    let Some(proc) = proc else { return false };
-    let set: SetWindowCompositionAttributeFn = std::mem::transmute(proc);
-    let mut accent = AccentPolicy {
-        state: 4, // ACCENT_ENABLE_ACRYLICBLURBEHIND
-        flags: 2,
-        tint: 0x80202028,
-        animation_id: 0,
-    };
-    let mut data = WindowCompositionAttributeData {
-        attribute: 19, // WCA_ACCENT_POLICY
-        data: &mut accent,
-        size: size_of::<AccentPolicy>(),
-    };
-    set(hwnd, &mut data) != 0
+    backdrop_result >= 0
 }
 
 unsafe fn apply_rounded_region(hwnd: HWND, radius: i32) {
