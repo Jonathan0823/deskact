@@ -27,7 +27,8 @@ use windows_numerics::Vector2;
 use windows_sys::Win32::{
     Foundation::RECT,
     Graphics::Dwm::{
-        DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_HOSTBACKDROPBRUSH, DwmSetWindowAttribute,
+        DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+        DWMWA_USE_HOSTBACKDROPBRUSH, DwmSetWindowAttribute,
     },
     UI::{HiDpi::GetDpiForWindow, WindowsAndMessaging::GetWindowRect},
 };
@@ -239,6 +240,22 @@ pub unsafe fn set_material(
         let _ = unsafe { set_attribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, 0) };
     }
     result
+}
+
+/// Apply the rectangular DWM system backdrop to a standard decorated window.
+///
+/// # Safety
+/// `hwnd` must be a live window owned by the calling thread.
+pub unsafe fn set_system_backdrop(
+    hwnd: NativeHwnd,
+    enabled: bool,
+) -> std::result::Result<(), String> {
+    let backdrop = if enabled {
+        DWMSBT_TRANSIENTWINDOW
+    } else {
+        DWMSBT_NONE
+    };
+    unsafe { set_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, backdrop) }
 }
 
 unsafe fn set_attribute(

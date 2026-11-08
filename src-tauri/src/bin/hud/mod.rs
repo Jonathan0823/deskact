@@ -52,6 +52,7 @@ pub fn run() {
             morph_island_window,
             set_backdrop_material,
             set_main_backdrop_material,
+            set_settings_backdrop_material,
             publish_appearance,
             hide_settings,
             set_backdrop_visibility,
@@ -120,6 +121,25 @@ async fn morph_island_window(
 #[tauri::command]
 fn set_backdrop_material(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
     apply_backdrop_material(&window, enabled)
+}
+
+#[tauri::command]
+fn set_settings_backdrop_material(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let window = app
+        .get_webview_window("settings")
+        .ok_or_else(|| "DeskAct's settings window is unavailable".to_owned())?;
+    #[cfg(windows)]
+    {
+        let hwnd = window
+            .hwnd()
+            .map_err(|_| "Could not access DeskAct settings' native window handle".to_owned())?;
+        return unsafe { windows_backdrop::set_system_backdrop(hwnd.0, enabled) };
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, enabled);
+        Ok(())
+    }
 }
 
 #[tauri::command]

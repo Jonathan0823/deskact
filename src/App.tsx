@@ -597,6 +597,7 @@ function SettingsWindow() {
 
   useEffect(() => {
     void invoke("set_main_backdrop_material", { enabled: appearance.micaEnabled }).catch(() => {});
+    void invoke("set_settings_backdrop_material", { enabled: appearance.micaEnabled }).catch(() => {});
   }, [appearance.micaEnabled]);
 
   useEffect(() => {
