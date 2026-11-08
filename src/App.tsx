@@ -166,6 +166,10 @@ function IslandApp() {
   const resolvedTheme = appearance.theme === "system" ? (systemPrefersDark ? "dark" : "light") : appearance.theme;
   const shellStyle = { "--glass-opacity": appearance.opacity / 100 } as CSSProperties;
   const displayedState = browserPreview ? previewView(previewState) : islandVisible ? state : "hidden";
+  const displayedStateRef = useRef(displayedState);
+  displayedStateRef.current = displayedState;
+  const islandVisibleRef = useRef(islandVisible);
+  islandVisibleRef.current = islandVisible;
   const displayedTask = browserPreview ? previewTask(previewState, previewStep) : task;
   const lastPreviewState = useRef<PreviewState>("command");
   if (browserPreview && previewState !== "hidden") lastPreviewState.current = previewState;
@@ -208,6 +212,7 @@ function IslandApp() {
         durationMs: prefersReducedMotion ? reducedIslandTransitionMs : islandTransitionMs,
       }).catch(() => {});
     }
+    islandVisibleRef.current = visible;
     setIslandVisible(visible);
   }
 
@@ -216,8 +221,8 @@ function IslandApp() {
       setPreviewState("hidden");
       return;
     }
-    if (displayedState === "hidden") {
-      void invoke("dismiss_island").catch(() => {});
+    if (displayedStateRef.current === "hidden") {
+      if (!hidePending.current) void invoke("dismiss_island").catch(() => {});
       return;
     }
     hidePending.current = true;
@@ -362,7 +367,11 @@ function IslandApp() {
 
   async function revealDeskAct() {
     hidePending.current = false;
-    setIslandVisibility(true);
+    if (!islandVisibleRef.current) {
+      requestAnimationFrame(() => requestAnimationFrame(() => setIslandVisibility(true)));
+    } else {
+      setIslandVisibility(true);
+    }
     const current = await refreshCurrentTask();
     if (isActiveTask(current)) {
       setState("working");
