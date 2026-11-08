@@ -2,6 +2,7 @@
 #include <dwmapi.h>
 #include <dispatcherqueue.h>
 #include <MddBootstrap.h>
+#include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.Composition.h>
 #include <winrt/Windows.UI.Composition.Desktop.h>
