@@ -28,6 +28,22 @@
         "resizable": true,
         "skipTaskbar": true,
         "shadow": false
+      },
+      {
+        "label": "settings",
+        "title": "DeskAct Settings",
+        "width": 560,
+        "height": 620,
+        "minWidth": 480,
+        "minHeight": 500,
+        "center": true,
+        "visible": false,
+        "decorations": true,
+        "transparent": false,
+        "alwaysOnTop": false,
+        "resizable": true,
+        "skipTaskbar": false,
+        "shadow": true
       }
     ],
     "security": {

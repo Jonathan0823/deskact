@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Check, CircleX, LoaderCircle, Mic, Send, TriangleAlert, X } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
@@ -137,6 +138,11 @@ function previewTask(state: PreviewState, step: number): TaskSnapshot | null {
 }
 
 export default function App() {
+  const settingsWindow = isTauri() && getCurrentWindow().label === "settings";
+  return settingsWindow ? <SettingsWindow /> : <IslandApp />;
+}
+
+function IslandApp() {
   const [state, setState] = useState<PrototypeState>("composer");
   const [previewState, setPreviewState] = useState<PreviewState>("command");
   const [previewStep, setPreviewStep] = useState(0);
@@ -300,11 +306,8 @@ export default function App() {
       if (disposed) unlisten();
       else listeners.push(unlisten);
     });
-    void listen("deskact://open-settings", () => {
-      hidePending.current = false;
-      setIslandVisibility(true);
-      setState("settings");
-      void refreshShortcut();
+    void listen<AppearanceSettings>("deskact://appearance-updated", (event) => {
+      setAppearance(event.payload);
     }).then((unlisten) => {
       if (disposed) unlisten();
       else listeners.push(unlisten);
@@ -549,46 +552,139 @@ export default function App() {
       )}
 
       {contentState === "settings" && (
-        <section className="surface settings-surface" aria-labelledby="settings-title">
-          <h1 id="settings-title">Appearance</h1>
-          <div className="theme-tabs" role="group" aria-label="Color theme">
-            {(["light", "dark", "system"] as const).map((theme) => <button key={theme} type="button" aria-pressed={appearance.theme === theme} onClick={() => setAppearance((value) => ({ ...value, theme }))}>{theme[0].toUpperCase() + theme.slice(1)}</button>)}
-          </div>
-          <div className="range-setting"><label htmlFor="glass-opacity">Glass opacity</label><output>{appearance.opacity}%</output><input id="glass-opacity" type="range" min="18" max="85" value={appearance.opacity} onChange={(event) => setAppearance((value) => ({ ...value, opacity: Number(event.target.value) }))} /></div>
-          <div className="toggle-setting">
-            <span id="mica-material-label">Desktop glass blur</span>
-            <button id="mica-material" className="toggle-switch" type="button" role="switch" aria-labelledby="mica-material-label" aria-checked={appearance.micaEnabled} onClick={() => setAppearance((value) => ({ ...value, micaEnabled: !value.micaEnabled }))}>
-              <span className="toggle-thumb" />
-            </button>
-            <span className="toggle-value">{appearance.micaEnabled ? "On" : "Off"}</span>
-          </div>
-          {!browserPreview && <>
-          <h2 className="settings-subheading">Global shortcut</h2>
-          <p className="settings-copy">Open DeskAct from another application.</p>
-          <label htmlFor="shortcut">Global shortcut</label>
-          <input
-            id="shortcut"
-            value={shortcutInput}
-            onChange={(event) => setShortcutInput(event.target.value)}
-            placeholder="Ctrl+Shift+Space"
-            spellCheck={false}
-          />
-          <p className={shortcut.registered ? "shortcut-status" : "shortcut-status warning"} role="status">
-            {shortcut.registered ? `Registered: ${shortcut.accelerator}` : "Shortcut is not registered; use the tray to reopen DeskAct."}
-          </p>
-          {(shortcut.error || saveError) && <p className="error-message" role="alert">{saveError ?? shortcut.error}</p>}
-          </>}
-          <div className="button-row">
-            <button className="quiet-button" type="button" onClick={() => browserPreview ? selectPreviewState("command") : setState("composer")}>Back</button>
-            {!browserPreview && <button className="primary-button" type="button" onClick={() => void saveShortcut()}>Save shortcut</button>}
-          </div>
-        </section>
+        <SettingsControls
+          appearance={appearance}
+          setAppearance={setAppearance}
+          shortcut={shortcut}
+          shortcutInput={shortcutInput}
+          setShortcutInput={setShortcutInput}
+          saveError={saveError}
+          onSaveShortcut={saveShortcut}
+          onClose={() => selectPreviewState("command")}
+          browserPreview
+        />
       )}
       </motion.div>
       </AnimatePresence>
       </main>
       {browserPreview && <PreviewControls selected={previewState} onSelect={selectPreviewState} />}
     </div>
+  );
+}
+
+function SettingsWindow() {
+  const [appearance, setAppearance] = useState<AppearanceSettings>(readAppearance);
+  const [systemPrefersDark, setSystemPrefersDark] = useState(false);
+  const [shortcut, setShortcut] = useState<ShortcutStatus>(defaultShortcut);
+  const [shortcutInput, setShortcutInput] = useState(defaultShortcut.accelerator);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const resolvedTheme = appearance.theme === "system" ? (systemPrefersDark ? "dark" : "light") : appearance.theme;
+  const shellStyle = { "--glass-opacity": appearance.opacity / 100 } as CSSProperties;
+
+  useEffect(() => {
+    try { localStorage.setItem(appearanceStorageKey, JSON.stringify(appearance)); } catch { /* Keep settings for this session. */ }
+    void invoke("publish_appearance", { appearance }).catch(() => {});
+  }, [appearance]);
+
+  useEffect(() => {
+    void invoke("set_main_backdrop_material", { enabled: appearance.micaEnabled }).catch(() => {});
+  }, [appearance.micaEnabled]);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => setSystemPrefersDark(media.matches);
+    update();
+    media.addEventListener?.("change", update);
+    return () => media.removeEventListener?.("change", update);
+  }, []);
+
+  useEffect(() => {
+    void invoke<ShortcutStatus>("get_shortcut_status").then((current) => {
+      setShortcut(current);
+      setShortcutInput(current.accelerator);
+    }).catch(() => setSaveError("Could not read shortcut settings."));
+  }, []);
+
+  async function saveShortcut() {
+    setSaveError(null);
+    try {
+      const updated = await invoke<ShortcutStatus>("update_global_shortcut", { accelerator: shortcutInput });
+      setShortcut(updated);
+      setShortcutInput(updated.accelerator);
+    } catch (error) {
+      setSaveError(String(error));
+    }
+  }
+
+  return (
+    <div className={`app-shell settings-window-shell theme-${resolvedTheme}`} style={shellStyle}>
+      <SettingsControls
+        appearance={appearance}
+        setAppearance={setAppearance}
+        shortcut={shortcut}
+        shortcutInput={shortcutInput}
+        setShortcutInput={setShortcutInput}
+        saveError={saveError}
+        onSaveShortcut={saveShortcut}
+        onClose={() => void invoke("hide_settings")}
+      />
+    </div>
+  );
+}
+
+type SettingsControlsProps = {
+  appearance: AppearanceSettings;
+  setAppearance: React.Dispatch<React.SetStateAction<AppearanceSettings>>;
+  shortcut: ShortcutStatus;
+  shortcutInput: string;
+  setShortcutInput: (value: string) => void;
+  saveError: string | null;
+  onSaveShortcut: () => void | Promise<void>;
+  onClose: () => void;
+  browserPreview?: boolean;
+};
+
+function SettingsControls({
+  appearance,
+  setAppearance,
+  shortcut,
+  shortcutInput,
+  setShortcutInput,
+  saveError,
+  onSaveShortcut,
+  onClose,
+  browserPreview = false,
+}: SettingsControlsProps) {
+  return (
+    <section className="surface settings-surface" aria-labelledby="settings-title">
+      <h1 id="settings-title">Appearance</h1>
+      <div className="theme-tabs" role="group" aria-label="Color theme">
+        {(["light", "dark", "system"] as const).map((theme) => <button key={theme} type="button" aria-pressed={appearance.theme === theme} onClick={() => setAppearance((value) => ({ ...value, theme }))}>{theme[0].toUpperCase() + theme.slice(1)}</button>)}
+      </div>
+      <div className="range-setting"><label htmlFor="glass-opacity">Glass opacity</label><output>{appearance.opacity}%</output><input id="glass-opacity" type="range" min="18" max="85" value={appearance.opacity} onChange={(event) => setAppearance((value) => ({ ...value, opacity: Number(event.target.value) }))} /></div>
+      <div className="toggle-setting">
+        <span id="mica-material-label">Desktop glass blur</span>
+        <button id="mica-material" className="toggle-switch" type="button" role="switch" aria-labelledby="mica-material-label" aria-checked={appearance.micaEnabled} onClick={() => setAppearance((value) => ({ ...value, micaEnabled: !value.micaEnabled }))}>
+          <span className="toggle-thumb" />
+        </button>
+        <span className="toggle-value">{appearance.micaEnabled ? "On" : "Off"}</span>
+      </div>
+      {!browserPreview && <>
+        <h2 className="settings-subheading">Global shortcut</h2>
+        <p className="settings-copy">Open DeskAct from another application.</p>
+        <label htmlFor="shortcut">Global shortcut</label>
+        <input id="shortcut" value={shortcutInput} onChange={(event) => setShortcutInput(event.target.value)} placeholder="Ctrl+Shift+Space" spellCheck={false} />
+        <p className={shortcut.registered ? "shortcut-status" : "shortcut-status warning"} role="status">
+          {shortcut.registered ? `Registered: ${shortcut.accelerator}` : "Shortcut is not registered; use the tray to reopen DeskAct."}
+        </p>
+        {(shortcut.error || saveError) && <p className="error-message" role="alert">{saveError ?? shortcut.error}</p>}
+      </>}
+      <div className="button-row">
+        <button className="quiet-button" type="button" onClick={onClose}>{browserPreview ? "Back" : "Done"}</button>
+        {!browserPreview && <button className="primary-button" type="button" onClick={() => void onSaveShortcut()}>Save shortcut</button>}
+      </div>
+    </section>
   );
 }
 

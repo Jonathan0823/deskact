@@ -9,7 +9,15 @@ mod windows_frame;
 
 use shortcuts::{ShortcutState, ShortcutStatus};
 use tasks::TaskHub;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppearanceSettings {
+    theme: String,
+    opacity: u8,
+    mica_enabled: bool,
+}
 
 pub fn run() {
     let context = tauri::generate_context!();
@@ -43,6 +51,9 @@ pub fn run() {
             yield_focus,
             morph_island_window,
             set_backdrop_material,
+            set_main_backdrop_material,
+            publish_appearance,
+            hide_settings,
             set_backdrop_visibility,
             quit_application,
             dismiss_island
@@ -50,7 +61,11 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                window_behavior::request_quit(window.app_handle());
+                if window.label() == "settings" {
+                    let _ = window.hide();
+                } else {
+                    window_behavior::request_quit(window.app_handle());
+                }
             }
         })
         .setup(|app| {
@@ -104,6 +119,29 @@ async fn morph_island_window(
 
 #[tauri::command]
 fn set_backdrop_material(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
+    apply_backdrop_material(&window, enabled)
+}
+
+#[tauri::command]
+fn publish_appearance(app: tauri::AppHandle, appearance: AppearanceSettings) -> Result<(), String> {
+    if !matches!(appearance.theme.as_str(), "light" | "dark" | "system")
+        || !(18..=85).contains(&appearance.opacity)
+    {
+        return Err("Appearance settings are outside the supported range".to_owned());
+    }
+    app.emit_to("main", "deskact://appearance-updated", appearance)
+        .map_err(|error| format!("Could not update the island appearance: {error}"))
+}
+
+#[tauri::command]
+fn set_main_backdrop_material(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "DeskAct's island window is unavailable".to_owned())?;
+    apply_backdrop_material(&window, enabled)
+}
+
+fn apply_backdrop_material(window: &tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
         let hwnd = window
@@ -118,6 +156,16 @@ fn set_backdrop_material(window: tauri::WebviewWindow, enabled: bool) -> Result<
         let _ = (window, enabled);
         Ok(())
     }
+}
+
+#[tauri::command]
+fn hide_settings(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("settings")
+        .ok_or_else(|| "DeskAct's settings window is unavailable".to_owned())?;
+    window
+        .hide()
+        .map_err(|_| "Could not hide DeskAct settings".to_owned())
 }
 
 #[tauri::command]

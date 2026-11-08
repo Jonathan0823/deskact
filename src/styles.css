@@ -330,6 +330,9 @@ button:focus-visible { outline: 2px solid #92b5ff; outline-offset: 2px; }
 .wave i:nth-child(3n) { --bar-height: 18px; }
 .attention-shell, .settings-surface { border: 1px solid var(--glass-border); background: linear-gradient(135deg,var(--glass-surface-a),var(--glass-surface-b)); box-shadow: var(--glass-shadow); }
 .settings-surface { display: grid; max-height: 460px; gap: 10px; overflow-y: auto; overscroll-behavior: contain; padding: 20px; border-radius: 24px; scrollbar-color: rgba(105,126,160,.42) transparent; scrollbar-width: thin; }
+.settings-window-shell { width: 100%; min-height: 100vh; overflow: auto; padding: 28px; background: #f2f4f8; }
+.settings-window-shell.theme-dark { background: #171717; }
+.settings-window-shell .settings-surface { width: min(100%, 500px); max-height: none; margin: 0 auto; overflow: visible; border-radius: 16px; }
 .settings-surface::-webkit-scrollbar { width: 6px; }
 .settings-surface::-webkit-scrollbar-thumb { border-radius: 6px; background: rgba(105,126,160,.42); }
 .toggle-setting { display: grid; grid-template-columns: minmax(0,1fr) auto auto; align-items: center; gap: 10px; color: var(--glass-foreground); font-size: 13px; }

@@ -12,7 +12,6 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Webview
 pub struct WindowMorphGeneration(AtomicU64);
 
 pub const INVOKED_EVENT: &str = "deskact://invoked";
-pub const SETTINGS_EVENT: &str = "deskact://open-settings";
 pub const QUIT_REQUESTED_EVENT: &str = "deskact://quit-requested";
 
 #[derive(Default)]
@@ -23,7 +22,10 @@ pub fn open_composer(app: &AppHandle) {
 }
 
 pub fn open_settings(app: &AppHandle) {
-    open_window(app, SETTINGS_EVENT);
+    if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 pub fn request_quit(app: &AppHandle) {
