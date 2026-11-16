@@ -30,7 +30,7 @@ use windows_sys::Win32::{
         DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
         DWMWA_USE_HOSTBACKDROPBRUSH, DwmSetWindowAttribute,
     },
-    UI::{HiDpi::GetDpiForWindow, WindowsAndMessaging::GetWindowRect},
+    UI::WindowsAndMessaging::GetWindowRect,
 };
 
 type NativeHwnd = windows_sys::Win32::Foundation::HWND;
@@ -148,14 +148,12 @@ impl BackdropSurface {
         self.root.StartAnimation(&property, &animation)
     }
 
-    fn resize(&self, width: i32, height: i32, radius: usize, dpi: u32) -> Result<()> {
-        // Composition visual coordinates are DIPs; HWND dimensions and corner radius are pixels.
-        let scale = (dpi.max(96) as f32) / 96.0;
+    fn resize(&self, width: i32, height: i32, radius: usize) -> Result<()> {
         let size = Vector2 {
-            X: width.max(0) as f32 / scale,
-            Y: height.max(0) as f32 / scale,
+            X: width.max(0) as f32,
+            Y: height.max(0) as f32,
         };
-        let radius = (radius as f32 / scale).min(size.X.min(size.Y) / 2.0);
+        let radius = (radius as f32).min(size.X.min(size.Y) / 2.0);
         self.root.SetSize(size)?;
         self.sprite.SetSize(size)?;
         self.geometry.SetSize(size)?;
@@ -215,12 +213,7 @@ pub unsafe fn set_material(
             if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
                 return Err(windows::core::Error::from_thread());
             }
-            surface.resize(
-                rect.right - rect.left,
-                rect.bottom - rect.top,
-                radius,
-                unsafe { GetDpiForWindow(hwnd) },
-            )?;
+            surface.resize(rect.right - rect.left, rect.bottom - rect.top, radius)?;
             surface.root.StopAnimation(&HSTRING::from("Opacity"))?;
             surface
                 .root
@@ -325,8 +318,7 @@ pub fn resize(hwnd: NativeHwnd, width: i32, height: i32, radius: usize) {
             && let Some(surface) = &state.surface
             && surface.hwnd == hwnd
         {
-            let dpi = unsafe { GetDpiForWindow(hwnd) };
-            let _ = surface.resize(width, height, radius, dpi);
+            let _ = surface.resize(width, height, radius);
         }
     });
 }
