@@ -67,6 +67,7 @@ pub async fn prepare_task_request(request: &str) -> Result<PreparedTask, DeskAct
         None => {
             let context = model_candidate_context(&catalog)?;
             let plan = request_action_plan_with_context(request, Some(&context)).await?;
+            validate_single_open_app_plan(&plan)?;
             (plan, "primary_model")
         }
     };
@@ -75,6 +76,15 @@ pub async fn prepare_task_request(request: &str) -> Result<PreparedTask, DeskAct
         catalog,
         route: route.to_owned(),
     })
+}
+
+fn validate_single_open_app_plan(plan: &ActionPlan) -> Result<(), DeskActError> {
+    if plan.steps.len() != 1 || plan.steps[0].operation != "open_app" {
+        return Err(DeskActError::new(
+            "The action plan must contain exactly one supported open_app step; no actions were executed".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Execute a prepared request through the native resolver supplied by the host.
@@ -429,6 +439,41 @@ mod tests {
                 .to_string()
                 .contains("unsupported arguments")
         );
+    }
+
+    #[test]
+    fn model_plan_must_contain_exactly_one_open_app_step() {
+        let plan = ActionPlan {
+            version: 1,
+            summary: "Open two apps".into(),
+            steps: vec![
+                ActionPlanStep {
+                    operation: "open_app".into(),
+                    parameters: BTreeMap::new(),
+                    expected_outcome: String::new(),
+                },
+                ActionPlanStep {
+                    operation: "open_app".into(),
+                    parameters: BTreeMap::new(),
+                    expected_outcome: String::new(),
+                },
+            ],
+        };
+        assert!(validate_single_open_app_plan(&plan).is_err());
+    }
+
+    #[test]
+    fn model_plan_rejects_other_single_step_operations() {
+        let plan = ActionPlan {
+            version: 1,
+            summary: "Unsupported action".into(),
+            steps: vec![ActionPlanStep {
+                operation: "delete_file".into(),
+                parameters: BTreeMap::new(),
+                expected_outcome: String::new(),
+            }],
+        };
+        assert!(validate_single_open_app_plan(&plan).is_err());
     }
 
     /// Reject compound requests instead of running only their first open-app portion.
