@@ -1,6 +1,6 @@
 # Adaptive Island Windows prototype validation
 
-This is an early native-window prototype for Phase 2 issue #39. The app previews three explicitly simulated layouts and performs no desktop actions. It does not request approval. The preview buttons are test controls, not task controls.
+This guide covers both the browser-only development preview and the current native Tauri application. The browser preview's Prototype controls switch among simulated UI states, including approval examples; they do not invoke native actions. The native application has no Prototype controls panel: its composer submits the currently supported catalog-grounded app-opening task, which can open a real desktop app without an approval step. Debug fixture mode replaces native execution with a labeled simulated result. Treat browser preview and fixture results as simulations, not native validation.
 
 ## Implemented for the prototype
 
@@ -12,15 +12,16 @@ This is an early native-window prototype for Phase 2 issue #39. The app previews
 
 ## Not yet established
 
-No interactive Windows desktop was available during implementation. Therefore non-activating status, foreground focus restoration, transparent-region click-through, monitor anchoring across a task, DPI/text scaling, multi-monitor fallback, and fullscreen behavior remain unverified. A transparent WebView background is not proof of native click-through. Hide currently requires relaunch because the tray/reopen path is a later ticket.
+No interactive Windows desktop was available during implementation. Therefore non-activating status, foreground focus restoration, transparent-region click-through, monitor anchoring across a task, DPI/text scaling, multi-monitor fallback, and fullscreen behavior remain unverified. A transparent WebView background is not proof of native click-through. The native app can be reopened with its global shortcut or the tray's Open DeskAct item; tray Settings opens the separate settings window.
 
 ## Manual Windows validation checklist
 
-Run the downloaded `deskact.exe` artifact in an interactive Windows session. Do not interpret any preview as a real task.
+Run the downloaded `deskact.exe` artifact in an interactive Windows session. The browser Prototype controls panel is absent from this native app. Native app-opening requests perform the supported desktop action; use fixture mode for a no-launch simulation and never treat its result as native verification.
 
-- [ ] Confirm the window opens on the current monitor near its top center and remains above other windows.
+- [ ] Confirm the window opens from the global shortcut and tray's Open DeskAct item, including after hiding it, on the current monitor near its top center and remains above other windows.
 - [ ] Switch to another application while the passive-status preview is showing. Confirm it does not take foreground focus or receive unintended keystrokes.
-- [ ] Click through each preview control and confirm the *native* window bounds resize to fit the content without clipping.
+- [ ] Open the composer and Settings from the native tray; confirm the native window bounds resize to fit each implemented view without clipping. Browser preview states and approval examples are not native controls.
+- [ ] For a real supported app-opening check, submit an exact configured catalog app name and confirm the requested app opens. This is a real desktop action and does not show an approval prompt; use the fixture smoke test instead when no app should launch.
 - [ ] Click on the transparent areas around the visible island and confirm the underlying app receives the click. Record if any part of the native bounds intercepts it.
 - [ ] While another app has focus, interact deliberately with the composer; record focus acquisition and where focus returns when leaving the island.
 - [ ] Run at 100%, 150%, and 200% display scaling; check that text and controls remain legible and no content is clipped.
