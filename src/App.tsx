@@ -156,11 +156,15 @@ function IslandApp() {
   const [request, setRequest] = useState("");
   const [task, setTask] = useState<TaskSnapshot | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [busyTestResult, setBusyTestResult] = useState<string | null>(null);
   const [quitRequested, setQuitRequested] = useState(false);
   const requestInput = useRef<HTMLInputElement>(null);
   const islandRef = useRef<HTMLElement>(null);
   const taskRef = useRef<TaskSnapshot | null>(null);
   const hidePending = useRef(false);
+  const quitRequestedRef = useRef(quitRequested);
+  const quitKeepOpenRef = useRef<HTMLButtonElement>(null);
+  const invocationGeneration = useRef(0);
   const browserPreview = import.meta.env.DEV && !isTauri();
   const prefersReducedMotion = useReducedMotion();
   const resolvedTheme = appearance.theme === "system" ? (systemPrefersDark ? "dark" : "light") : appearance.theme;
@@ -170,6 +174,7 @@ function IslandApp() {
   displayedStateRef.current = displayedState;
   const islandVisibleRef = useRef(islandVisible);
   islandVisibleRef.current = islandVisible;
+  quitRequestedRef.current = quitRequested;
   const displayedTask = browserPreview ? previewTask(previewState, previewStep) : task;
   const lastPreviewState = useRef<PreviewState>("command");
   if (browserPreview && previewState !== "hidden") lastPreviewState.current = previewState;
@@ -257,7 +262,18 @@ function IslandApp() {
 
   useLayoutEffect(() => {
     morphWindowToContent();
-  }, [state, quitRequested, task?.phase]);
+  }, [state, quitRequested, task?.phase, submitError]);
+
+  useLayoutEffect(() => {
+    if (!quitRequested) return;
+    quitKeepOpenRef.current?.focus();
+  }, [quitRequested]);
+
+  useEffect(() => {
+    if (!browserPreview || previewState !== "done") return;
+    const timer = window.setTimeout(() => setPreviewState("command"), 1100);
+    return () => window.clearTimeout(timer);
+  }, [browserPreview, previewState]);
 
   useEffect(() => {
     if (!browserPreview || previewState !== "working") return;
@@ -298,6 +314,10 @@ function IslandApp() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
+        if (quitRequestedRef.current) {
+          setQuitRequested(false);
+          return;
+        }
         dismissIsland();
       }
     };
@@ -307,9 +327,21 @@ function IslandApp() {
     let disposed = false;
     const listeners: Array<() => void> = [];
 
-    void listen("deskact://invoked", () => { void revealDeskAct(); }).then((unlisten) => {
-      if (disposed) unlisten();
-      else listeners.push(unlisten);
+    void listen<number>("deskact://invoked", (event) => {
+      invocationGeneration.current = Math.max(invocationGeneration.current, event.payload);
+      void revealDeskAct();
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      listeners.push(unlisten);
+      void invoke<number>("get_invocation_generation").then((generation) => {
+        if (generation > invocationGeneration.current) {
+          invocationGeneration.current = generation;
+          void revealDeskAct();
+        }
+      }).catch(() => {});
     });
     void listen<AppearanceSettings>("deskact://appearance-updated", (event) => {
       setAppearance(event.payload);
@@ -355,11 +387,11 @@ function IslandApp() {
     if (!isTauri()) return null;
     try {
       const current = await invoke<TaskSnapshot | null>("get_task_snapshot");
-      if (current) {
-        acceptTaskSnapshot(current);
-        if (isActiveTask(current)) setState("working");
-      }
-      return current;
+      if (!current) return null;
+      acceptTaskSnapshot(current);
+      const accepted = taskRef.current;
+      if (isActiveTask(accepted)) setState("working");
+      return accepted;
     } catch {
       return null;
     }
@@ -417,6 +449,18 @@ function IslandApp() {
       await invoke("stop_task", { taskId: task.task_id });
     } catch (error) {
       setSubmitError(String(error));
+    }
+  }
+
+  async function testBusyResponse() {
+    setBusyTestResult(null);
+    try {
+      await invoke("submit_task", { request: "open DeskAct Fixture App" });
+      setBusyTestResult("Unexpectedly accepted a second task.");
+    } catch (error) {
+      setBusyTestResult(String(error).startsWith("busy:")
+        ? "Busy response confirmed; the second request was not queued."
+        : `Busy test failed: ${String(error)}`);
     }
   }
 
@@ -518,6 +562,9 @@ function IslandApp() {
           <TaskStatus
             task={contentTask}
             onStop={() => browserPreview ? selectPreviewState("cancelled") : void stopTask()}
+            onTryBusy={isTauri() && import.meta.env.DEV && contentTask.test_fixture && isActiveTask(contentTask) ? () => void testBusyResponse() : undefined}
+            busyTestResult={busyTestResult}
+            onLayoutChange={() => morphWindowToContent()}
           />
         ) : (
           <section className="shell compact-shell" aria-label="Task status">
@@ -554,7 +601,7 @@ function IslandApp() {
           <h1 id="quit-title">Quit while a task is active?</h1>
           <p id="quit-description">DeskAct will stop running. Any in-flight app opening may still complete, and its outcome may be uncertain. Quit does not roll back completed effects.</p>
           <div className="button-row">
-            <button className="quiet-button" type="button" onClick={() => setQuitRequested(false)}>Keep DeskAct open</button>
+            <button ref={quitKeepOpenRef} className="quiet-button" type="button" onClick={() => setQuitRequested(false)}>Keep DeskAct open</button>
             <button className="danger-button" type="button" onClick={() => void invoke("quit_application")}>Quit anyway</button>
           </div>
         </section>
@@ -719,25 +766,73 @@ function StreamingText({ text }: { text: string }) {
   );
 }
 
-export function TaskStatus({ task, onStop }: { task: TaskSnapshot; onStop: () => void }) {
+export function TaskStatus({
+  task,
+  onStop,
+  onTryBusy,
+  busyTestResult,
+  onLayoutChange,
+}: {
+  task: TaskSnapshot;
+  onStop: () => void;
+  onTryBusy?: () => void;
+  busyTestResult?: string | null;
+  onLayoutChange?: () => void;
+}) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const active = isActiveTask(task);
   const complete = task.phase === "completed";
   const cancelled = task.phase === "cancelled";
   const failed = task.phase === "partial" || task.phase === "failed";
   const label = complete ? task.message || "Task completed"
     : failed ? task.message || "Action needs attention"
-      : task.phase === "cancelled" ? "Task cancelled"
+      : cancelled ? task.message || "Task cancelled"
         : task.message || phaseLabel(task.phase);
+  const progress = task.progress && task.progress.total_steps > 0
+    ? Math.max(0, Math.min(task.progress.current_step, task.progress.total_steps))
+    : null;
 
   return (
     <section className="shell task-shell" aria-label="Task status">
-      <span className="task-label">{label}</span>
+      <span className={`task-label${cancelled ? " task-label-wrap" : ""}`}>{label}</span>
       {active ? <span className="loader" aria-label="Working" />
         : complete ? <Check className="done-icon" size={28} aria-label="Completed" />
           : failed ? <TriangleAlert className="error-icon" size={26} aria-label="Needs attention" />
             : cancelled ? <CircleX className="cancelled-icon" size={28} aria-label="Cancelled" />
               : null}
       {active && <button className="glass-icon" type="button" aria-label={task.cancellation_requested ? "Stopping task" : "Cancel task"} disabled={task.cancellation_requested} onClick={onStop}><X size={22} aria-hidden="true" /></button>}
+      <button className="text-control task-details-toggle" type="button" aria-expanded={detailsOpen} onClick={() => {
+        setDetailsOpen((open) => !open);
+        window.requestAnimationFrame(() => onLayoutChange?.());
+      }}>
+        {detailsOpen ? "Hide details" : "Details"}
+      </button>
+      {onTryBusy && <button className="text-control task-busy-test" type="button" onClick={onTryBusy}>Test busy response</button>}
+      {progress !== null && (
+        <div className="task-progress">
+          <div className="progress-track" role="progressbar" aria-label="Task progress" aria-valuemin={0} aria-valuemax={task.progress!.total_steps} aria-valuenow={progress} aria-valuetext={`Step ${progress} of ${task.progress!.total_steps}`}>
+            <span className="progress-indicator" style={{ width: `${progress / task.progress!.total_steps * 100}%` }} />
+          </div>
+          <span className="task-progress-label">Step {progress} of {task.progress!.total_steps}</span>
+        </div>
+      )}
+      {busyTestResult && <p className="task-test-result" role="status">{busyTestResult}</p>}
+      {detailsOpen && (
+        <div className="task-detail-list">
+          <p><strong>Request:</strong> {task.request}</p>
+          {task.report && <>
+            <p><strong>Report:</strong> {task.report.summary}</p>
+            {task.report.achieved_postconditions.length > 0 && <div>
+              <strong>Achieved postconditions</strong>
+              <ul>{task.report.achieved_postconditions.map((item, index) => <li key={`achieved-${index}`}>{item}</li>)}</ul>
+            </div>}
+            {task.report.unresolved_steps.length > 0 && <div>
+              <strong>Unresolved steps</strong>
+              <ul>{task.report.unresolved_steps.map((item, index) => <li key={`unresolved-${index}`}>{item}</li>)}</ul>
+            </div>}
+          </>}
+        </div>
+      )}
     </section>
   );
 }

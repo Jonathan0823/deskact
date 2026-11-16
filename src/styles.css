@@ -86,6 +86,7 @@ button { color: inherit; cursor: pointer; }
 }
 .command-input::placeholder { color: #858b96; }
 .command-input:focus, .command-input:focus-visible { border: 0; outline: 0; box-shadow: none; }
+.command-input:focus-visible { outline: 2px solid #92b5ff; outline-offset: 4px; border-radius: 4px; }
 .play-button {
   display: grid;
   width: 34px;
@@ -263,9 +264,9 @@ button:focus-visible { outline: 2px solid #92b5ff; outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
  .cancelled-icon, .cancelled-icon circle, .cancelled-icon path { animation-duration: .01ms !important; animation-delay: 0ms !important; }
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
-  .island { transition-duration: 260ms, 260ms, 260ms, var(--island-transition-duration), 0s, 0s !important; transition-delay: 0s, 0s, 0s, 0s, 0s, var(--island-transition-duration) !important; }
+  .island { transition: opacity var(--island-transition-duration,180ms) cubic-bezier(.22,1,.36,1), transform var(--island-transition-duration,180ms) cubic-bezier(.22,1,.36,1), visibility 0s linear var(--island-transition-duration,180ms) !important; transition-delay: 0s, 0s, var(--island-transition-duration,180ms) !important; }
   .island.reduced-motion.is-hidden { transform: none; }
-  .island.reduced-motion:not(.is-hidden) { transition-delay: 0s, 0s, 0s, 0s, 0s, 0s !important; }
+  .island.reduced-motion:not(.is-hidden) { transition-delay: 0s, 0s, 0s !important; }
 }
 
 /* Soft Glass surface adapted from DeskAct_Soft_Glass_Translucent_v0.3.html */
@@ -305,6 +306,12 @@ button:focus-visible { outline: 2px solid #92b5ff; outline-offset: 2px; }
 .send-button:disabled { cursor: default; opacity: .58; }
 .task-shell { display: grid; grid-template-columns: minmax(0,1fr) auto auto; align-items: center; gap: 14px; min-height: 72px; padding: 10px 20px; }
 .task-label { min-width: 0; overflow: hidden; color: var(--glass-foreground); font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }
+.task-label-wrap { overflow: visible; overflow-wrap: anywhere; text-overflow: clip; white-space: normal; }
+.task-progress, .task-test-result { grid-column: 1 / -1; }
+.task-progress { display: grid; gap: 5px; }
+.task-progress-label { color: #9298a3; font-size: 10px; }
+.task-test-result { margin: 0; color: #ecc88e; font-size: 11px; overflow-wrap: anywhere; }
+.task-detail-list ul { margin: 4px 0 0; padding-left: 18px; }
 .task-shell .loader { width: 30px; height: 30px; border: 3px solid rgba(91,139,220,.26); border-top-color: #367df0; border-right-color: #367df0; border-radius: 50%; animation: spin 1.1s linear infinite; }
 .task-shell .done-icon { color: #2c9f70; }
 .task-shell .error-icon { color: #c64854; }

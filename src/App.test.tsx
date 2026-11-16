@@ -141,11 +141,13 @@ describe("Adaptive Island", () => {
     expect(screen.queryByRole("button", { name: "Use text" })).toBeNull();
   });
 
-  it("shows an animated neutral icon for cancelled tasks", () => {
-    const cancelledTask = { ...activeTask, phase: "cancelled" as const, message: "Task cancelled" };
+  it("shows the full cancellation message and neutral icon", () => {
+    const message = "Stopped after an in-flight app opening. Calculator was verified open; completed effects were not rolled back.";
+    const cancelledTask = { ...activeTask, phase: "cancelled" as const, message };
     render(<TaskStatus task={cancelledTask} onStop={() => {}} />);
 
-    expect(screen.getByText("Task cancelled")).toBeTruthy();
+    expect(screen.getByText(message)).toBeTruthy();
+    expect(document.querySelector(".task-label-wrap")).toBeTruthy();
     expect(screen.getByLabelText("Cancelled")).toBeTruthy();
     expect(document.querySelector(".task-shell .cancelled-icon")).toBeTruthy();
     expect(document.querySelector(".task-shell .loader")).toBeNull();
@@ -158,8 +160,38 @@ describe("Adaptive Island", () => {
 
     expect(screen.getByRole("region", { name: "Task status" }).className).toContain("task-shell");
     expect(screen.getByText("Opening Spotify")).toBeTruthy();
-    expect(screen.queryByRole("progressbar", { name: "Task progress" })).toBeNull();
+    expect(screen.getByRole("progressbar", { name: "Task progress" }).getAttribute("aria-valuenow")).toBe("1");
     await user.click(screen.getByRole("button", { name: "Cancel task" }));
     expect(onStop).toHaveBeenCalledOnce();
+  });
+
+  it("does not fabricate progress for live tasks without progress data", () => {
+    const { progress: _progress, ...liveTask } = activeTask;
+    render(<TaskStatus task={liveTask} onStop={() => {}} />);
+    expect(screen.queryByRole("progressbar", { name: "Task progress" })).toBeNull();
+  });
+
+  it("shows the established report structure in terminal task details", async () => {
+    const user = userEvent.setup();
+    const partialTask = {
+      ...activeTask,
+      phase: "partial" as const,
+      message: "Some work completed, but one or more outcomes remain unverified.",
+      report: {
+        summary: "Opened Calculator",
+        status: "partial",
+        achieved_postconditions: ["Calculator is open in a uniquely matched accessible window."],
+        unresolved_steps: ["Step 2 (open Calendar): not attempted after an earlier step could not be verified"],
+        evidence: [{ app_name: "Calculator" }],
+      },
+    };
+    render(<TaskStatus task={partialTask} onStop={() => {}} />);
+
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    expect(screen.getByText("Opened Calculator")).toBeTruthy();
+    expect(screen.getByText("Achieved postconditions")).toBeTruthy();
+    expect(screen.getByText("Calculator is open in a uniquely matched accessible window.")).toBeTruthy();
+    expect(screen.getByText("Unresolved steps")).toBeTruthy();
+    expect(screen.getByText("Step 2 (open Calendar): not attempted after an earlier step could not be verified")).toBeTruthy();
   });
 });
