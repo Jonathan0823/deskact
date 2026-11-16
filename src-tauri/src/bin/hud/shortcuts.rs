@@ -75,7 +75,17 @@ pub fn update_global_shortcut(
     let shortcut = parse_shortcut(&accelerator)?;
     let previous = state.snapshot();
     if previous.registered && parse_shortcut(&previous.accelerator).ok() == Some(shortcut) {
-        return Ok(previous);
+        if previous.error.is_none() {
+            return Ok(previous);
+        }
+        save_shortcut(app, &accelerator)?;
+        let status = ShortcutStatus {
+            accelerator,
+            error: None,
+            ..previous
+        };
+        state.replace(status.clone());
+        return Ok(status);
     }
 
     app.global_shortcut()
