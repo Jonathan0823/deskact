@@ -38,10 +38,10 @@ Open DeskAct from the tray or global shortcut, submit `open DeskAct Fixture App`
 
 With fixture mode and `$env:DESKACT_HUD_TEST_FIXTURE_DELAY_MS = '10000'`, submit the fixture request and check these interactions before the delay ends:
 
-1. Expand and collapse Details; the same request and revisioned status must remain intact.
-2. Submit a second request while the first is active; DeskAct must show busy, not queue it. After the first task ends, the second request should not start by itself.
+1. Expand and collapse Details; the request remains visible and the active task continues unchanged.
+2. While the first task is still active, click the development-only **Test busy response** button. It invokes the existing `submit_task` command with a second fixture request. Confirm the busy response says the second request was not queued. Let the first task end and verify the second request does not start automatically.
 3. Press Escape to hide the island, then reopen with the global shortcut or tray; the same active request and status should reappear from Rust state.
-4. Press Stop and confirm the final state is cancelled, no desktop action was dispatched, and another request can then be explicitly submitted.
+4. Press Stop and confirm the final state is cancelled, the fixture label/message confirms no desktop action was dispatched, and another request can then be explicitly submitted.
 5. Start another delayed fixture task and choose Quit from the tray or close control; confirm the uncertainty disclosure, choose Keep DeskAct open, then stop the fixture task.
 
 To check the explicit quit path, start one more delayed fixture task, choose Quit anyway in the confirmation dialog, and confirm the app exits. No OS action is performed in fixture mode.
@@ -52,4 +52,4 @@ For a real app-opening check, unset `DESKACT_HUD_TEST_FIXTURE`, install the docu
 
 ## What this smoke test does not prove
 
-Browser component tests and fixture mode do not establish Windows focus restoration, non-activating passive status, transparent-region click-through, DPI behavior, monitor movement, or native verification. Those require the separate interactive Windows checklist. The fixture can be delayed for Stop testing. Cancellation cannot roll back an app opening already in flight; the task report communicates that uncertainty.
+Browser component tests and fixture mode do not establish Windows focus restoration, non-activating passive status, transparent-region click-through, DPI behavior, monitor movement, or native verification. Those require the separate interactive Windows checklist. The fixture can be delayed for Stop testing. Its terminal snapshot is labeled as fixture data. Details exposes the task report, including achieved postconditions and unresolved steps when present. Cancellation cannot roll back an app opening already in flight; the task report communicates that uncertainty.
