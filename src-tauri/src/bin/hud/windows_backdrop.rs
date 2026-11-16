@@ -221,6 +221,7 @@ pub unsafe fn set_material(
                 radius,
                 unsafe { GetDpiForWindow(hwnd) },
             )?;
+            surface.root.StopAnimation(&HSTRING::from("Opacity"))?;
             surface
                 .root
                 .SetOpacity(if window_visible { 1.0 } else { 0.0 })?;
