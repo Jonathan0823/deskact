@@ -11,6 +11,15 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Webview
 #[derive(Default)]
 pub struct WindowMorphGeneration(AtomicU64);
 
+#[derive(Default)]
+pub struct InvocationGeneration(AtomicU64);
+
+impl InvocationGeneration {
+    pub fn current(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 pub const INVOKED_EVENT: &str = "deskact://invoked";
 pub const QUIT_REQUESTED_EVENT: &str = "deskact://quit-requested";
 
@@ -63,7 +72,16 @@ fn open_window(app: &AppHandle, event: &str) {
     }
 
     if window.show().is_ok() && window.set_focus().is_ok() {
-        let _ = window.emit(event, ());
+        if event == INVOKED_EVENT {
+            let generation = app
+                .state::<InvocationGeneration>()
+                .0
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            let _ = window.emit(event, generation);
+        } else {
+            let _ = window.emit(event, ());
+        }
     }
 }
 

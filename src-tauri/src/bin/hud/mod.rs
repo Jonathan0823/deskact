@@ -31,6 +31,7 @@ pub fn run() {
         .manage(ShortcutState::default())
         .manage(window_behavior::PreviousForegroundWindow::default())
         .manage(window_behavior::WindowMorphGeneration::default())
+        .manage(window_behavior::InvocationGeneration::default())
         .manage(TaskHub::default())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -46,6 +47,7 @@ pub fn run() {
             update_global_shortcut,
             tasks::get_task_snapshot,
             tasks::get_last_task_result,
+            get_invocation_generation,
             tasks::submit_task,
             tasks::stop_task,
             yield_focus,
@@ -86,6 +88,13 @@ pub fn run() {
         })
         .run(context)
         .expect("error while running DeskAct");
+}
+
+#[tauri::command]
+fn get_invocation_generation(
+    state: tauri::State<'_, window_behavior::InvocationGeneration>,
+) -> u64 {
+    state.current()
 }
 
 #[tauri::command]
