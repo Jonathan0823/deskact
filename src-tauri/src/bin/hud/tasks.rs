@@ -267,7 +267,10 @@ pub fn submit_task(
                     )
                 } else {
                     match report.status.as_str() {
-                        "completed" => (TaskPhase::Completed, report.summary.clone()),
+                        "completed" => (
+                            TaskPhase::Completed,
+                            completion_message(&report, test_fixture),
+                        ),
                         "partial" => (
                             TaskPhase::Partial,
                             "Some work completed, but one or more outcomes remain unverified."
@@ -344,6 +347,14 @@ fn emit_snapshot(app: &AppHandle, snapshot: &TaskSnapshot) {
 
 fn user_message(error: &DeskActError) -> String {
     error.to_string()
+}
+
+fn completion_message(report: &TaskExecutionReport, test_fixture: bool) -> String {
+    if test_fixture {
+        format!("Fixture: {}", report.summary)
+    } else {
+        report.summary.clone()
+    }
 }
 
 fn cancellation_failure_message(test_fixture: bool, native_started: bool) -> String {
@@ -510,6 +521,23 @@ mod tests {
             hub.snapshot().expect("stopped result").phase,
             TaskPhase::Cancelled
         );
+    }
+
+    #[test]
+    fn fixture_completion_is_labeled_without_changing_native_completion() {
+        let report = TaskExecutionReport {
+            route: "registered_workflow".to_owned(),
+            status: "completed".to_owned(),
+            summary: "Opened Calculator".to_owned(),
+            achieved_postconditions: vec!["Calculator is open".to_owned()],
+            unresolved_steps: Vec::new(),
+            evidence: Vec::new(),
+        };
+        assert_eq!(
+            completion_message(&report, true),
+            "Fixture: Opened Calculator"
+        );
+        assert_eq!(completion_message(&report, false), "Opened Calculator");
     }
 
     #[test]
