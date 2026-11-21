@@ -390,7 +390,7 @@ fn unsupported_model_operation_fails_before_any_native_mutation() {
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(
-        error.contains("step 2 uses unsupported operation `click`"),
+        error.contains("exactly one supported open_app step"),
         "{error}"
     );
     let calls = fs::read_to_string(directory.path().join("native-calls.log"))

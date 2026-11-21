@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 
 use crate::{
     ActionPlan, ActionPlanStep, AppCatalogEntry, DeskActError, NativeTargetResolution,
-    prepare_app_selection, validate_action_plan_json,
+    load_app_catalog, prepare_app_selection, request_action_plan_with_context,
+    validate_action_plan_json,
 };
 
 /// Public result from one completed task-execution request.
@@ -39,6 +40,59 @@ pub struct TaskExecutionEvidence {
     pub snapshot_id: String,
     /// Number of actionable references in the snapshot.
     pub ref_count: usize,
+}
+
+/// A locally validated app-opening request ready for native execution.
+#[derive(Debug, Clone)]
+pub struct PreparedTask {
+    plan: ActionPlan,
+    catalog: Vec<AppCatalogEntry>,
+    route: String,
+}
+
+/// Validate and prepare a request using the local catalog and primary model when needed.
+pub async fn prepare_task_request(request: &str) -> Result<PreparedTask, DeskActError> {
+    if request.trim().is_empty()
+        || request.chars().count() > 4_000
+        || request.chars().any(char::is_control)
+    {
+        return Err(DeskActError::new(
+            "Task request must be non-empty, at most 4,000 characters, and contain no control characters".into(),
+        ));
+    }
+    let catalog = load_app_catalog()?;
+    validate_open_app_request(request, &catalog)?;
+    let (plan, route) = match registered_open_workflow(request, &catalog)? {
+        Some((plan, _entry)) => (plan, "registered_workflow"),
+        None => {
+            let context = model_candidate_context(&catalog)?;
+            let plan = request_action_plan_with_context(request, Some(&context)).await?;
+            validate_single_open_app_plan(&plan)?;
+            (plan, "primary_model")
+        }
+    };
+    Ok(PreparedTask {
+        plan,
+        catalog,
+        route: route.to_owned(),
+    })
+}
+
+fn validate_single_open_app_plan(plan: &ActionPlan) -> Result<(), DeskActError> {
+    if plan.steps.len() != 1 || plan.steps[0].operation != "open_app" {
+        return Err(DeskActError::new(
+            "The action plan must contain exactly one supported open_app step; no actions were executed".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Execute a prepared request through the native resolver supplied by the host.
+pub fn execute_prepared_task(
+    prepared: PreparedTask,
+    resolve: impl FnMut(&AppCatalogEntry) -> Result<NativeTargetResolution, DeskActError>,
+) -> Result<TaskExecutionReport, DeskActError> {
+    execute_action_plan(&prepared.plan, &prepared.catalog, &prepared.route, resolve)
 }
 
 /// Validate that a request is one complete, explicit app-opening intent within the current executor scope.
@@ -385,6 +439,41 @@ mod tests {
                 .to_string()
                 .contains("unsupported arguments")
         );
+    }
+
+    #[test]
+    fn model_plan_must_contain_exactly_one_open_app_step() {
+        let plan = ActionPlan {
+            version: 1,
+            summary: "Open two apps".into(),
+            steps: vec![
+                ActionPlanStep {
+                    operation: "open_app".into(),
+                    parameters: BTreeMap::new(),
+                    expected_outcome: String::new(),
+                },
+                ActionPlanStep {
+                    operation: "open_app".into(),
+                    parameters: BTreeMap::new(),
+                    expected_outcome: String::new(),
+                },
+            ],
+        };
+        assert!(validate_single_open_app_plan(&plan).is_err());
+    }
+
+    #[test]
+    fn model_plan_rejects_other_single_step_operations() {
+        let plan = ActionPlan {
+            version: 1,
+            summary: "Unsupported action".into(),
+            steps: vec![ActionPlanStep {
+                operation: "delete_file".into(),
+                parameters: BTreeMap::new(),
+                expected_outcome: String::new(),
+            }],
+        };
+        assert!(validate_single_open_app_plan(&plan).is_err());
     }
 
     /// Reject compound requests instead of running only their first open-app portion.
