@@ -44,11 +44,13 @@ pub(crate) use native::{
 };
 pub use native::{VerifiedNativeCli, native_inventory, preflight, resolve_native_target};
 mod acceptance;
+mod agent_tools;
 mod snapshot;
 pub use acceptance::{
     NotepadAcceptanceReport, run_calculator_acceptance, run_file_explorer_acceptance,
     run_notepad_acceptance, run_vlc_acceptance,
 };
+pub use agent_tools::{OBSERVATION_BYTE_CAP, Observation, TargetWindowTools};
 
 /// Exact `agent-desktop` release required for native CLI operations.
 pub const SUPPORTED_AGENT_DESKTOP_VERSION: &str = "1.1.0";
