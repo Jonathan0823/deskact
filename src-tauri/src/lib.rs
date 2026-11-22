@@ -48,11 +48,15 @@ pub use native::{VerifiedNativeCli, native_inventory, preflight, resolve_native_
 mod acceptance;
 mod agent_tools;
 mod snapshot;
+mod step_policy;
 pub use acceptance::{
     NotepadAcceptanceReport, run_calculator_acceptance, run_file_explorer_acceptance,
     run_notepad_acceptance, run_vlc_acceptance,
 };
 pub use agent_tools::{OBSERVATION_BYTE_CAP, Observation, TargetWindowTools};
+pub use step_policy::{
+    AgentStep, StepApprover, StepClass, StepFlag, StepGate, StepRisk, classify_step, gate_step,
+};
 
 /// Exact `agent-desktop` release required for native CLI operations.
 pub const SUPPORTED_AGENT_DESKTOP_VERSION: &str = "1.1.0";
