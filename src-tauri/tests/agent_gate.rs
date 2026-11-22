@@ -19,6 +19,7 @@ const SNAPSHOT: &str = r##"{"window":{"id":"w"},"tree":{"role":"window","name":"
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
+        .enable_time()
         .build()
         .expect("runtime")
         .block_on(future)
@@ -182,6 +183,21 @@ impl AgentModel for CompetentModel {
         if task.id == "AT-46" {
             script.push(click("@e7"));
         }
+        // Every click, set_value or press invalidates refs, so a careful model observes again.
+        let mut script: Vec<AgentTool> = script
+            .into_iter()
+            .flat_map(|tool| {
+                let mutating = matches!(
+                    tool,
+                    AgentTool::SetValue { .. } | AgentTool::Click { .. } | AgentTool::Press { .. }
+                );
+                let mut calls = vec![tool];
+                if mutating {
+                    calls.push(AgentTool::Observe { root: None });
+                }
+                calls
+            })
+            .collect();
         script.push(AgentTool::Finish {
             summary: "done".into(),
         });

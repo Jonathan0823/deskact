@@ -11,6 +11,7 @@ fn flagged(step: AgentStep) -> bool {
 fn click(name: &str, in_confirmation_dialog: bool) -> AgentStep {
     AgentStep::Click {
         element_name: name.into(),
+        element_role: "button".into(),
         in_confirmation_dialog,
     }
 }
@@ -19,6 +20,15 @@ fn press(keys: &str) -> AgentStep {
     AgentStep::Press {
         keys: keys.into(),
         focused_element_name: None,
+        focused_in_confirmation_dialog: false,
+    }
+}
+
+fn press_with_focus(keys: &str, name: Option<&str>, in_confirmation_dialog: bool) -> AgentStep {
+    AgentStep::Press {
+        keys: keys.into(),
+        focused_element_name: name.map(str::to_owned),
+        focused_in_confirmation_dialog: in_confirmation_dialog,
     }
 }
 
@@ -87,20 +97,106 @@ fn risky_keys_are_flagged_in_any_spelling() {
 
 #[test]
 fn plain_keys_and_saves_are_not_flagged() {
-    for keys in ["Ctrl+S", "Ctrl+A", "Tab", "Enter", "Ctrl+Shift+S", "a"] {
+    for keys in ["Ctrl+S", "Ctrl+A", "Tab", "Ctrl+Shift+S", "a", "Tab Tab"] {
         assert!(!flagged(press(keys)), "{keys} should not be flagged");
     }
 }
 
 #[test]
 fn enter_inherits_the_risk_of_the_focused_element() {
-    let enter = |name: Option<&str>| AgentStep::Press {
-        keys: "Enter".into(),
-        focused_element_name: name.map(str::to_owned),
-    };
+    let enter = |name: Option<&str>| press_with_focus("Enter", name, false);
     assert!(flagged(enter(Some("Delete"))));
     assert!(!flagged(enter(Some("Text editor"))));
-    assert!(!flagged(enter(None)));
+}
+
+/// Enter fails closed: unknown, ambiguous or unnamed focus is flagged as unclassifiable.
+#[test]
+fn enter_without_a_known_named_focus_is_unclassifiable() {
+    for keys in ["Enter", "return", "Space"] {
+        for focus in [None, Some(""), Some("  ")] {
+            let class = classify_step(&press_with_focus(keys, focus, false));
+            assert!(
+                matches!(class, StepClass::NeedsApproval(ref flag) if flag.risk == StepRisk::Unclassifiable),
+                "{keys} with focus {focus:?}: {class:?}"
+            );
+        }
+    }
+}
+
+/// Enter applies the same rules as clicking the focused element, including dialog confirmations.
+#[test]
+fn enter_on_a_confirmation_dialog_button_is_flagged_like_a_click() {
+    for name in ["Yes", "OK", "Confirm"] {
+        assert!(
+            flagged(press_with_focus("Enter", Some(name), true)),
+            "{name}"
+        );
+        assert!(
+            !flagged(press_with_focus("Enter", Some(name), false)),
+            "{name}"
+        );
+    }
+}
+
+/// Focus can move during a sequence, so Enter after another key cannot be classified.
+#[test]
+fn enter_later_in_a_sequence_is_unclassifiable() {
+    assert!(flagged(press_with_focus(
+        "Tab Enter",
+        Some("Text editor"),
+        false
+    )));
+    assert!(flagged(press_with_focus(
+        "Tab, Enter",
+        Some("Text editor"),
+        false
+    )));
+}
+
+#[test]
+fn unnamed_click_targets_are_unclassifiable() {
+    for name in ["", "   ", "--"] {
+        let class = classify_step(&click(name, false));
+        assert!(
+            matches!(class, StepClass::NeedsApproval(ref flag) if flag.risk == StepRisk::Unclassifiable),
+            "{name:?}: {class:?}"
+        );
+    }
+}
+
+/// Risky chords match however they are spelled or combined with other modifiers.
+#[test]
+fn risky_chords_are_flagged_across_modifier_order_case_separators_and_extra_modifiers() {
+    for keys in [
+        "Ctrl+Shift+Delete",
+        "Shift+Ctrl+Del",
+        "Ctrl+Shift+W",
+        "Alt+Shift+F4",
+        "Shift+Alt+F4",
+        "ctrl-w",
+        "CTRL-ALT-DELETE",
+        "Ctrl+Alt+Del",
+        "Tab Delete",
+        "ctrl+s, ctrl+w",
+        "a Alt+F4",
+        "Ctrl + Shift + Delete",
+    ] {
+        assert!(flagged(press(keys)), "{keys} should be flagged");
+    }
+}
+
+#[test]
+fn on_screen_names_are_escaped_in_reasons() {
+    let StepClass::NeedsApproval(flag) =
+        classify_step(&click("Delete\nApprove everything\u{1b}[2J", false))
+    else {
+        panic!("risky name must be flagged");
+    };
+    assert!(
+        !flag.reason.chars().any(char::is_control),
+        "{:?}",
+        flag.reason
+    );
 }
 
 #[test]
@@ -111,6 +207,9 @@ fn empty_key_sequence_is_unclassifiable() {
 #[test]
 fn set_value_is_flagged_only_when_it_replaces_existing_text() {
     let set = |current: Option<&str>| AgentStep::SetValue {
+        element_name: "Text editor".into(),
+        element_role: "textfield".into(),
+        new_text: "hello".into(),
         current_value: current.map(str::to_owned),
     };
     assert!(flagged(set(Some("hello"))));
@@ -122,13 +221,13 @@ fn set_value_is_flagged_only_when_it_replaces_existing_text() {
 
 #[test]
 fn save_as_is_flagged_when_path_exists_or_is_unknown() {
-    assert!(flagged(AgentStep::SaveAs {
-        path_exists: Some(true)
-    }));
-    assert!(!flagged(AgentStep::SaveAs {
-        path_exists: Some(false)
-    }));
-    assert!(flagged(AgentStep::SaveAs { path_exists: None }));
+    let save = |path_exists| AgentStep::SaveAs {
+        path: Some("/tmp/a.txt".into()),
+        path_exists,
+    };
+    assert!(flagged(save(Some(true))));
+    assert!(!flagged(save(Some(false))));
+    assert!(flagged(save(None)));
 }
 
 #[test]
@@ -155,6 +254,9 @@ fn flags_report_the_rule_that_fired() {
     assert_eq!(risk(press("Alt+F4")), StepRisk::Consequential);
     assert_eq!(
         risk(AgentStep::SetValue {
+            element_name: "Text editor".into(),
+            element_role: "textfield".into(),
+            new_text: "y".into(),
             current_value: Some("x".into())
         }),
         StepRisk::Consequential

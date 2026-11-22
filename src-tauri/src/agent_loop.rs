@@ -8,7 +8,7 @@
 use std::{
     collections::HashMap,
     future::Future,
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::{
     AgentStep, AgentTool, AgentTurn, CancellationToken, DeskActError, Observation, StepApprover,
-    StepGate, TargetWindowTools, gate_step, request_agent_turn,
+    StepGate, TargetWindowTools, gate_step, request_agent_turn, step_policy::escape_text,
 };
 
 /// DeskAct-owned tool prompt, adapted from the `agent-desktop` 1.1.0 skill text.
@@ -79,6 +79,8 @@ pub enum AgentOutcome {
     },
     /// The user denied a flagged step; the model was not told.
     StoppedByUser,
+    /// The model could not be reached or answered with an error; the work so far is partial.
+    ModelError(String),
     /// Cancelled between steps.
     Cancelled,
     /// A budget limit ran out: the work is partial and unverified.
@@ -146,6 +148,101 @@ impl AgentDesktop for TargetWindowTools {
     }
 }
 
+impl<D: AgentDesktop> AgentDesktop for &mut D {
+    fn observe(&mut self, root: Option<&str>) -> Result<Observation, DeskActError> {
+        (**self).observe(root)
+    }
+    fn click(&mut self, element: &str) -> Result<(), DeskActError> {
+        (**self).click(element)
+    }
+    fn set_value(&mut self, element: &str, text: &str) -> Result<(), DeskActError> {
+        (**self).set_value(element, text)
+    }
+    fn read_value(&mut self, element: &str) -> Result<String, DeskActError> {
+        (**self).read_value(element)
+    }
+    fn press(&mut self, keys: &str) -> Result<(), DeskActError> {
+        (**self).press(keys)
+    }
+}
+
+/// One desktop call, as reported to a `DesktopObserver`.
+#[derive(Debug, Clone, Copy)]
+pub enum DesktopCall<'a> {
+    /// `observe` with an optional drill-down root.
+    Observe(Option<&'a str>),
+    /// `click` on a ref.
+    Click(&'a str),
+    /// `set_value` on a ref with new text.
+    SetValue(&'a str, &'a str),
+    /// `read_value` on a ref.
+    ReadValue(&'a str),
+    /// `press` with keys.
+    Press(&'a str),
+}
+
+/// Watches desktop calls without changing them; used for progress output and run records.
+pub trait DesktopObserver {
+    /// Called before the call is forwarded.
+    fn before(&mut self, _call: DesktopCall<'_>) {}
+    /// Called after the call; `value` is the text a `read_value` returned.
+    fn after(&mut self, _call: DesktopCall<'_>, _succeeded: bool, _value: Option<&str>) {}
+}
+
+/// Decorator that forwards every call to `inner` and reports it to `observer`.
+pub struct ObservedDesktop<D, O> {
+    /// The wrapped desktop.
+    pub inner: D,
+    /// The observer that sees every call.
+    pub observer: O,
+}
+
+impl<D, O> ObservedDesktop<D, O> {
+    /// Wrap `inner` so `observer` sees its calls.
+    pub fn wrap(inner: D, observer: O) -> Self {
+        Self { inner, observer }
+    }
+}
+
+impl<D: AgentDesktop, O: DesktopObserver> AgentDesktop for ObservedDesktop<D, O> {
+    fn observe(&mut self, root: Option<&str>) -> Result<Observation, DeskActError> {
+        let call = DesktopCall::Observe(root);
+        self.observer.before(call);
+        let result = self.inner.observe(root);
+        self.observer.after(call, result.is_ok(), None);
+        result
+    }
+    fn click(&mut self, element: &str) -> Result<(), DeskActError> {
+        let call = DesktopCall::Click(element);
+        self.observer.before(call);
+        let result = self.inner.click(element);
+        self.observer.after(call, result.is_ok(), None);
+        result
+    }
+    fn set_value(&mut self, element: &str, text: &str) -> Result<(), DeskActError> {
+        let call = DesktopCall::SetValue(element, text);
+        self.observer.before(call);
+        let result = self.inner.set_value(element, text);
+        self.observer.after(call, result.is_ok(), None);
+        result
+    }
+    fn read_value(&mut self, element: &str) -> Result<String, DeskActError> {
+        let call = DesktopCall::ReadValue(element);
+        self.observer.before(call);
+        let result = self.inner.read_value(element);
+        self.observer
+            .after(call, result.is_ok(), result.as_deref().ok());
+        result
+    }
+    fn press(&mut self, keys: &str) -> Result<(), DeskActError> {
+        let call = DesktopCall::Press(keys);
+        self.observer.before(call);
+        let result = self.inner.press(keys);
+        self.observer.after(call, result.is_ok(), None);
+        result
+    }
+}
+
 /// Source of user answers to `ask_user` questions (console in the dev harness, island later).
 pub trait UserAnswers {
     /// Show the question; return the answer, or `None` when the user gives none (the run then ends).
@@ -168,8 +265,19 @@ impl<A> UserAnswers for ApproveOnly<'_, A> {
 }
 
 /// Wrap on-screen text so the model sees it as data; the closing tag cannot be forged from inside.
+///
+/// Any spelling of the closing tag (any case, with or without the final `>`) is broken up.
 pub fn frame_untrusted(content: &str) -> String {
-    let safe = content.replace(UNTRUSTED_CLOSE, "<\\/untrusted_window_content>");
+    let closing = &UNTRUSTED_CLOSE[..UNTRUSTED_CLOSE.len() - 1];
+    let lowered = content.to_ascii_lowercase();
+    let (mut safe, mut copied) = (String::with_capacity(content.len()), 0);
+    for (start, _) in lowered.match_indices(closing) {
+        safe.push_str(&content[copied..start]);
+        safe.push_str("<\\/");
+        safe.push_str(&content[start + 2..start + closing.len()]);
+        copied = start + closing.len();
+    }
+    safe.push_str(&content[copied..]);
     format!("{UNTRUSTED_OPEN}\n{safe}\n{UNTRUSTED_CLOSE}")
 }
 
@@ -178,6 +286,7 @@ pub fn frame_untrusted(content: &str) -> String {
 struct Element {
     name: String,
     role: String,
+    value: String,
     focused: bool,
     dialog: Option<String>,
 }
@@ -186,15 +295,32 @@ struct Element {
 struct Elements(HashMap<String, Element>);
 
 impl Elements {
-    fn record(&mut self, observation: &Observation, full: bool) {
-        if full {
-            self.0.clear();
-        }
+    /// Record an observation. A whole-window one replaces all facts; a drill-down below `root`
+    /// merges and keeps the dialog context of the element it expands.
+    fn record(&mut self, observation: &Observation, root: Option<&str>) {
+        let dialog = match root {
+            None => {
+                self.0.clear();
+                None
+            }
+            Some(root) => self.get(root).and_then(|element| {
+                if element.role == "dialog" {
+                    Some(element.name.clone())
+                } else {
+                    element.dialog.clone()
+                }
+            }),
+        };
         if let Ok(parsed) = serde_json::from_str::<Value>(&observation.text)
             && let Some(tree) = parsed.get("tree")
         {
-            self.collect(tree, None);
+            self.collect(tree, dialog.as_deref());
         }
+    }
+
+    /// Forget everything: after a mutating action every ref and fact is stale.
+    fn invalidate(&mut self) {
+        self.0.clear();
     }
 
     fn collect(&mut self, node: &Value, dialog: Option<&str>) {
@@ -210,6 +336,7 @@ impl Elements {
                 Element {
                     name: name.to_owned(),
                     role: role.to_owned(),
+                    value: text("value").to_owned(),
                     focused,
                     dialog: dialog.map(str::to_owned),
                 },
@@ -230,8 +357,11 @@ impl Elements {
         self.0.get(reference)
     }
 
-    fn focused(&self) -> Option<&Element> {
-        self.0.values().find(|element| element.focused)
+    /// The focused element, only when exactly one node claims focus; ambiguity is not guessed at.
+    fn sole_focus(&self) -> Option<&Element> {
+        let mut focused = self.0.values().filter(|element| element.focused);
+        let first = focused.next()?;
+        focused.next().is_none().then_some(first)
     }
 
     /// The file name field of the same Save As dialog as `element`.
@@ -243,32 +373,70 @@ impl Elements {
             .then_some(reference.as_str())
         })
     }
+
+    /// The folder a Save As dialog is showing, when its address element exposes an absolute path
+    /// (as its value, or after the `Address:` prefix of its name).
+    fn dialog_folder(&self, element: &Element) -> Option<PathBuf> {
+        self.0
+            .values()
+            .filter(|candidate| candidate.dialog == element.dialog)
+            .filter(|candidate| candidate.name.to_lowercase().starts_with("address"))
+            .find_map(|candidate| {
+                let named = candidate.name.split_once(':').map(|(_, rest)| rest.trim());
+                [Some(candidate.value.trim()), named]
+                    .into_iter()
+                    .flatten()
+                    .map(Path::new)
+                    .find(|path| path.is_absolute())
+                    .map(Path::to_path_buf)
+            })
+    }
 }
 
+/// The Save As file dialog itself. The overwrite prompt "Confirm Save As" is a confirmation dialog.
 fn in_save_as(element: &Element) -> bool {
-    element
-        .dialog
-        .as_deref()
-        .is_some_and(|name| name.to_lowercase().contains("save as"))
+    element.dialog.as_deref().is_some_and(|name| {
+        let name = name.to_lowercase();
+        name.contains("save as") && !name.contains("confirm")
+    })
 }
 
-/// Check whether the file name in a Save As dialog already exists; only absolute paths can be checked.
+fn in_confirmation_dialog(element: &Element) -> bool {
+    element.dialog.is_some() && !in_save_as(element)
+}
+
+/// Resolve the path a Save As would write and check whether it exists.
+///
+/// An absolute name is used as is; a bare or relative name is resolved against the folder the
+/// dialog shows. When no folder can be observed the path stays unresolved and the step is flagged
+/// as unclassifiable (fail closed).
 fn save_as_step(
     desktop: &mut impl AgentDesktop,
     elements: &Elements,
     in_dialog: &Element,
 ) -> AgentStep {
-    let path_exists = elements
+    let typed = elements
         .save_as_field(in_dialog)
         .and_then(|field| desktop.read_value(field).ok())
-        .and_then(|path| {
-            let path = Path::new(path.trim());
-            path.is_absolute().then(|| path.exists())
-        });
-    AgentStep::SaveAs { path_exists }
+        .unwrap_or_default();
+    let typed = Path::new(typed.trim());
+    let resolved = if typed.as_os_str().is_empty() {
+        None
+    } else if typed.is_absolute() {
+        Some(typed.to_path_buf())
+    } else {
+        elements
+            .dialog_folder(in_dialog)
+            .map(|folder| folder.join(typed))
+    };
+    AgentStep::SaveAs {
+        path_exists: resolved.as_ref().map(|path| path.exists()),
+        path: resolved.map(|path| path.display().to_string()),
+    }
 }
 
-/// Build the step Rust classifies; `None` for read-only tools and refs the tools will reject.
+/// Build the step Rust classifies; `None` for read-only tools. Click and set_value refs must have
+/// been checked against `Elements` already.
 fn step_for(
     tool: &AgentTool,
     desktop: &mut impl AgentDesktop,
@@ -282,24 +450,35 @@ fn step_for(
             }
             Some(AgentStep::Click {
                 element_name: element.name.clone(),
-                in_confirmation_dialog: element.dialog.is_some() && !in_save_as(element),
+                element_role: element.role.clone(),
+                in_confirmation_dialog: in_confirmation_dialog(element),
             })
         }
-        AgentTool::SetValue { element_ref, .. } => {
-            elements.get(element_ref)?;
+        AgentTool::SetValue { element_ref, text } => {
+            let element = elements.get(element_ref)?;
             Some(AgentStep::SetValue {
+                element_name: element.name.clone(),
+                element_role: element.role.clone(),
+                new_text: text.clone(),
                 current_value: desktop.read_value(element_ref).ok(),
             })
         }
         AgentTool::Press { keys } => {
-            let focused = elements.focused();
+            let focused = elements.sole_focus();
             let is_enter = matches!(keys.trim().to_lowercase().as_str(), "enter" | "return");
-            if is_enter && let Some(element) = focused.filter(|element| in_save_as(element)) {
+            if is_enter
+                && let Some(element) = focused.filter(|element| {
+                    in_save_as(element)
+                        && (element.name.trim().eq_ignore_ascii_case("save")
+                            || matches!(element.role.as_str(), "textfield" | "edit"))
+                })
+            {
                 return Some(save_as_step(desktop, elements, element));
             }
             Some(AgentStep::Press {
                 keys: keys.clone(),
                 focused_element_name: focused.map(|element| element.name.clone()),
+                focused_in_confirmation_dialog: focused.is_some_and(in_confirmation_dialog),
             })
         }
         AgentTool::Observe { .. }
@@ -381,7 +560,7 @@ pub async fn run_agent_loop_with_answers(
     }
     let first = desktop.observe(None)?;
     calls += 1;
-    elements.record(&first, true);
+    elements.record(&first, None);
     messages.push(json!({"role": "user", "content": format!(
         "Task: {request}\n\nInitial observation of the target window:\n{}",
         frame_untrusted(&first.text)
@@ -395,11 +574,25 @@ pub async fn run_agent_loop_with_answers(
             return Ok(report(AgentOutcome::BudgetExhausted(limit), turns, calls));
         }
         turns += 1;
-        let turn = model.next_turn(&messages).await?;
+        let remaining = budget.max_duration.saturating_sub(started.elapsed());
+        let turn = match tokio::time::timeout(remaining, model.next_turn(&messages)).await {
+            Ok(Ok(turn)) => turn,
+            Ok(Err(error)) => {
+                return Ok(report(
+                    AgentOutcome::ModelError(error.to_string()),
+                    turns,
+                    calls,
+                ));
+            }
+            Err(_) => {
+                let outcome = AgentOutcome::BudgetExhausted(BudgetLimit::WallClock);
+                return Ok(report(outcome, turns, calls));
+            }
+        };
         messages.push(turn.assistant_message.clone());
         if turn.tool_calls.is_empty() {
             messages.push(json!({"role": "user", "content":
-                "Respond with a tool call. Use finish when the task is done or ask_user if blocked."}));
+                "Respond with a tool call. Use finish when you believe the task is finished or ask_user if blocked."}));
             continue;
         }
         let mut asked = false;
@@ -437,15 +630,36 @@ pub async fn run_agent_loop_with_answers(
             if let Some(limit) = exhausted(&budget, turns - 1, calls, started) {
                 return Ok(report(AgentOutcome::BudgetExhausted(limit), turns, calls));
             }
+            if let AgentTool::Click { element_ref } | AgentTool::SetValue { element_ref, .. } =
+                &call.tool
+                && elements.get(element_ref).is_none()
+            {
+                messages.push(tool_message(
+                    &call.id,
+                    format!(
+                        "error: ref `{}` was not observed since the window last changed; observe first",
+                        escape_text(element_ref)
+                    ),
+                ));
+                continue;
+            }
             if let Some(step) = step_for(&call.tool, desktop, &elements)
                 && gate_step(&step, user) == StepGate::StoppedByUser
             {
                 return Ok(report(AgentOutcome::StoppedByUser, turns, calls));
             }
             calls += 1;
-            let content = match execute(&call.tool, desktop, &mut elements) {
+            let result = execute(&call.tool, desktop, &mut elements);
+            if matches!(
+                call.tool,
+                AgentTool::Click { .. } | AgentTool::SetValue { .. } | AgentTool::Press { .. }
+            ) {
+                // The window may have changed: refs and facts are stale until observed again.
+                elements.invalidate();
+            }
+            let content = match result {
                 Ok(text) => text,
-                Err(error) => format!("error: {error}"),
+                Err(error) => format!("error: {}", frame_untrusted(&error.to_string())),
             };
             messages.push(tool_message(&call.id, content));
         }
@@ -460,7 +674,7 @@ fn execute(
     Ok(match tool {
         AgentTool::Observe { root } => {
             let observation = desktop.observe(root.as_deref())?;
-            elements.record(&observation, root.is_none());
+            elements.record(&observation, root.as_deref());
             frame_untrusted(&observation.text)
         }
         AgentTool::Click { element_ref } => {

@@ -14,8 +14,9 @@ use serde_json::Value;
 
 use crate::{
     AgentBudget, AgentDesktop, AgentLoopReport, AgentModel, AgentOutcome, AgentStep,
-    AppCatalogEntry, CancellationToken, DeskActError, Observation, StepApprover, UserAnswers,
-    run_agent_loop_with_answers, validate_open_app_request,
+    AppCatalogEntry, CancellationToken, DeskActError, DesktopCall, DesktopObserver, Observation,
+    ObservedDesktop, StepApprover, UserAnswers,
+    run_agent_loop_with_answers, step_policy::escape_text, validate_open_app_request,
 };
 
 /// Which path a request takes.
@@ -110,6 +111,9 @@ impl AgentTaskReport {
                 ));
             }
             AgentOutcome::StoppedByUser => lines.push("Stopped by user.".into()),
+            AgentOutcome::ModelError(error) => {
+                lines.push(format!("Partial and unverified: model error ({error})."));
+            }
             AgentOutcome::Cancelled => lines.push("Cancelled.".into()),
             AgentOutcome::BudgetExhausted(limit) => {
                 lines.push(format!(
@@ -245,10 +249,16 @@ impl<R: BufRead, W: Write> ConsolePrompts<R, W> {
     }
 }
 
+/// Longest typed text shown in full in an approval prompt.
+const PROMPT_TEXT_LIMIT: usize = 300;
+
+/// Describe the exact scope of a step for approval: names, roles, text, path and keys, all escaped
+/// so on-screen or model text cannot forge prompt lines or terminal escapes.
 pub(crate) fn describe_step(step: &AgentStep) -> String {
     match step {
         AgentStep::Click {
             element_name,
+            element_role,
             in_confirmation_dialog,
         } => {
             let place = if *in_confirmation_dialog {
@@ -256,12 +266,50 @@ pub(crate) fn describe_step(step: &AgentStep) -> String {
             } else {
                 ""
             };
-            format!("click \"{element_name}\"{place}")
+            format!(
+                "click \"{}\" ({}){place}",
+                escape_text(element_name),
+                escape_text(element_role)
+            )
         }
-        AgentStep::Press { keys, .. } => format!("press {keys}"),
-        AgentStep::SetValue { .. } => "replace the value of a field".into(),
-        AgentStep::SaveAs { .. } => "confirm a Save As dialog".into(),
-        AgentStep::Unclassifiable { reason } => format!("unclassified step ({reason})"),
+        AgentStep::Press {
+            keys,
+            focused_element_name,
+            ..
+        } => {
+            let focus = match focused_element_name {
+                Some(name) => format!("focus on \"{}\"", escape_text(name)),
+                None => "focus unknown".to_owned(),
+            };
+            format!("press {} ({focus})", escape_text(keys))
+        }
+        AgentStep::SetValue {
+            element_name,
+            element_role,
+            new_text,
+            ..
+        } => {
+            let shown: String = new_text.chars().take(PROMPT_TEXT_LIMIT).collect();
+            let total = new_text.chars().count();
+            let more = if total > PROMPT_TEXT_LIMIT {
+                format!("... ({total} characters in all)")
+            } else {
+                String::new()
+            };
+            format!(
+                "replace the value of \"{}\" ({}) with \"{}{more}\"",
+                escape_text(element_name),
+                escape_text(element_role),
+                escape_text(&shown)
+            )
+        }
+        AgentStep::SaveAs { path, .. } => match path {
+            Some(path) => format!("confirm Save As to \"{}\"", escape_text(path)),
+            None => "confirm Save As to an unresolved path".to_owned(),
+        },
+        AgentStep::Unclassifiable { reason } => {
+            format!("unclassified step ({})", escape_text(reason))
+        }
     }
 }
 
@@ -285,45 +333,32 @@ impl<R: BufRead, W: Write> UserAnswers for ConsolePrompts<R, W> {
     }
 }
 
-/// Prints one progress line per executed action, then delegates to the wrapped desktop.
-pub struct ReportingDesktop<D, W> {
-    inner: D,
+/// Prints one progress line per executed action.
+pub struct ProgressLog<W> {
     output: W,
 }
 
-impl<D, W: Write> ReportingDesktop<D, W> {
-    /// Wrap `inner`, writing progress to `output`.
-    pub fn new(inner: D, output: W) -> Self {
-        Self { inner, output }
-    }
-
-    fn note(&mut self, line: String) {
+impl<W: Write> DesktopObserver for ProgressLog<W> {
+    fn before(&mut self, call: DesktopCall<'_>) {
+        let line = match call {
+            DesktopCall::Observe(root) => format!("observe {}", root.unwrap_or("window")),
+            DesktopCall::Click(element) => format!("click {element}"),
+            DesktopCall::SetValue(element, text) => {
+                format!("set_value {element} ({} chars)", text.chars().count())
+            }
+            DesktopCall::ReadValue(element) => format!("read_value {element}"),
+            DesktopCall::Press(keys) => format!("press {}", escape_text(keys)),
+        };
         let _ = writeln!(self.output, "  -> {line}");
     }
 }
 
-impl<D: AgentDesktop, W: Write> AgentDesktop for ReportingDesktop<D, W> {
-    fn observe(&mut self, root: Option<&str>) -> Result<Observation, DeskActError> {
-        self.note(format!("observe {}", root.unwrap_or("window")));
-        self.inner.observe(root)
-    }
-    fn click(&mut self, element: &str) -> Result<(), DeskActError> {
-        self.note(format!("click {element}"));
-        self.inner.click(element)
-    }
-    fn set_value(&mut self, element: &str, text: &str) -> Result<(), DeskActError> {
-        self.note(format!(
-            "set_value {element} ({} chars)",
-            text.chars().count()
-        ));
-        self.inner.set_value(element, text)
-    }
-    fn read_value(&mut self, element: &str) -> Result<String, DeskActError> {
-        self.note(format!("read_value {element}"));
-        self.inner.read_value(element)
-    }
-    fn press(&mut self, keys: &str) -> Result<(), DeskActError> {
-        self.note(format!("press {keys}"));
-        self.inner.press(keys)
+/// Prints one progress line per executed action, then delegates to the wrapped desktop.
+pub type ReportingDesktop<D, W> = ObservedDesktop<D, ProgressLog<W>>;
+
+impl<D, W: Write> ObservedDesktop<D, ProgressLog<W>> {
+    /// Wrap `inner`, writing progress to `output`.
+    pub fn new(inner: D, output: W) -> Self {
+        Self::wrap(inner, ProgressLog { output })
     }
 }

@@ -120,6 +120,7 @@ impl StepApprover for Approver {
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
+        .enable_time()
         .build()
         .expect("runtime")
         .block_on(future)
@@ -409,10 +410,81 @@ fn budget_exhaustion_is_reported_partial_and_unverified() {
     assert!(report.render().contains("Partial and unverified"));
 }
 
+fn prompt_for(step: &AgentStep) -> String {
+    let mut output = Vec::new();
+    ConsolePrompts::new(Cursor::new(String::new()), &mut output).approve(step, "reason");
+    String::from_utf8(output).expect("utf8")
+}
+
+/// The approval prompt names the exact scope: element, role, new text, full path and keys.
+#[test]
+fn approval_prompts_show_the_exact_scope_of_each_step() {
+    let click = prompt_for(&AgentStep::Click {
+        element_name: "Yes".into(),
+        element_role: "button".into(),
+        in_confirmation_dialog: true,
+    });
+    assert!(
+        click.contains("\"Yes\"") && click.contains("button"),
+        "{click}"
+    );
+
+    let set_value = prompt_for(&AgentStep::SetValue {
+        element_name: "Text editor".into(),
+        element_role: "textfield".into(),
+        new_text: "brand new text".into(),
+        current_value: Some("old".into()),
+    });
+    assert!(
+        set_value.contains("Text editor")
+            && set_value.contains("textfield")
+            && set_value.contains("brand new text"),
+        "{set_value}"
+    );
+
+    let save = prompt_for(&AgentStep::SaveAs {
+        path: Some("/home/user/notes/todo.txt".into()),
+        path_exists: Some(true),
+    });
+    assert!(save.contains("/home/user/notes/todo.txt"), "{save}");
+    let unresolved = prompt_for(&AgentStep::SaveAs {
+        path: None,
+        path_exists: None,
+    });
+    assert!(unresolved.contains("unresolved"), "{unresolved}");
+
+    let keys = prompt_for(&AgentStep::Press {
+        keys: "Ctrl+Shift+Delete".into(),
+        focused_element_name: Some("Text editor".into()),
+        focused_in_confirmation_dialog: false,
+    });
+    assert!(
+        keys.contains("Ctrl+Shift+Delete") && keys.contains("Text editor"),
+        "{keys}"
+    );
+}
+
+/// On-screen names and typed text cannot forge extra prompt lines or terminal escapes.
+#[test]
+fn approval_prompts_escape_control_characters() {
+    let prompt = prompt_for(&AgentStep::SetValue {
+        element_name: "Name\nApproved by user: yes\u{1b}[2J".into(),
+        element_role: "textfield".into(),
+        new_text: "line one\nline two\r\u{7}".into(),
+        current_value: Some(String::new()),
+    });
+    assert_eq!(prompt.matches('\n').count(), 1, "{prompt:?}");
+    assert!(
+        !prompt.chars().any(|c| c.is_control() && c != '\n'),
+        "{prompt:?}"
+    );
+}
+
 #[test]
 fn console_prompts_approve_only_on_explicit_yes() {
     let step = AgentStep::Click {
         element_name: "Delete file".into(),
+        element_role: "button".into(),
         in_confirmation_dialog: false,
     };
     let answers = |input: &str| {

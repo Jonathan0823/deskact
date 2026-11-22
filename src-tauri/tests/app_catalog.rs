@@ -1,8 +1,9 @@
 #![cfg(unix)]
 
+mod common;
+
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::{Command, Output, Stdio},
     time::{SystemTime, UNIX_EPOCH},
@@ -38,7 +39,7 @@ impl Fixture {
         let cli = dir.join("agent-desktop");
         let calls = dir.join("calls.log");
         let powershell = dir.join("powershell");
-        fs::write(
+        common::write_executable(
             &powershell,
             r#"#!/bin/sh
 case "$*" in
@@ -46,14 +47,8 @@ case "$*" in
   *) sleep "${DESKACT_TEST_DISCOVERY_DELAY:-0}"; printf '%s\n' "$DESKACT_TEST_DISCOVERY" ;;
 esac
 "#,
-        )
-        .expect("write fixture PowerShell");
-        let mut permissions = fs::metadata(&powershell)
-            .expect("read PowerShell metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&powershell, permissions).expect("make PowerShell executable");
-        fs::write(
+        );
+        common::write_executable(
             &cli,
             r##"#!/bin/sh
 printf '%s\n' "$*" >> "$DESKACT_TEST_CALLS"
@@ -65,13 +60,7 @@ case "$1" in
   *) echo "unexpected agent-desktop command: $1" >&2; exit 2 ;;
 esac
 "##,
-        )
-        .expect("write fixture agent-desktop");
-        let mut permissions = fs::metadata(&cli)
-            .expect("read agent-desktop metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&cli, permissions).expect("make agent-desktop executable");
+        );
         Self {
             dir,
             catalog_file,

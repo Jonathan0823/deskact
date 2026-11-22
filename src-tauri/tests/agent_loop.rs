@@ -158,6 +158,7 @@ fn run(
 ) -> deskact_core::AgentLoopReport {
     let mut tools = fixture.tools();
     tokio::runtime::Builder::new_current_thread()
+        .enable_time()
         .build()
         .expect("runtime")
         .block_on(run_agent_loop(

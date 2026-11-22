@@ -1,8 +1,9 @@
 #![cfg(unix)]
 
+mod common;
+
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
@@ -29,7 +30,7 @@ impl Fixture {
         let cli = dir.join("agent-desktop");
         let powershell = dir.join("powershell");
         let calls = dir.join("calls.log");
-        fs::write(
+        common::write_executable(
             &cli,
             r##"#!/bin/sh
 printf '%s\n' "$*" >> "$DESKACT_TEST_CALLS"
@@ -56,21 +57,13 @@ case "$1" in
  *) echo "unexpected command: $1" >&2; exit 2 ;;
 esac
 "##,
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&cli).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&cli, permissions).unwrap();
-        fs::write(
+        );
+        common::write_executable(
             &powershell,
             r##"#!/bin/sh
 printf '%s\n' 'C:\Windows\explorer.exe'
 "##,
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&powershell).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&powershell, permissions).unwrap();
+        );
         Self {
             dir,
             cli,

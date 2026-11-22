@@ -56,8 +56,9 @@ pub use acceptance::{
 };
 pub use agent_loop::{
     AGENT_TOOL_PROMPT, AgentBudget, AgentDesktop, AgentLoopReport, AgentModel, AgentOutcome,
-    BudgetLimit, ChatCompletionsAgentModel, MAX_EXECUTED_TOOL_CALLS, MAX_MODEL_TURNS,
-    MAX_TASK_DURATION, UserAnswers, frame_untrusted, run_agent_loop, run_agent_loop_with_answers,
+    BudgetLimit, ChatCompletionsAgentModel, DesktopCall, DesktopObserver, MAX_EXECUTED_TOOL_CALLS,
+    MAX_MODEL_TURNS, MAX_TASK_DURATION, ObservedDesktop, UserAnswers, frame_untrusted,
+    run_agent_loop, run_agent_loop_with_answers,
 };
 mod agent_gate;
 pub use agent_gate::{
@@ -66,8 +67,8 @@ pub use agent_gate::{
 };
 mod agent_run;
 pub use agent_run::{
-    AgentTaskReport, ConsolePrompts, Expectation, ReportingDesktop, TaskRoute, Verification,
-    route_request, run_agent_task,
+    AgentTaskReport, ConsolePrompts, Expectation, ProgressLog, ReportingDesktop, TaskRoute,
+    Verification, route_request, run_agent_task,
 };
 pub use agent_tools::{OBSERVATION_BYTE_CAP, Observation, TargetWindowTools};
 pub use step_policy::{

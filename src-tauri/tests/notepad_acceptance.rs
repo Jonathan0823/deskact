@@ -1,8 +1,11 @@
 #![cfg(unix)]
 
+mod common;
+
+use common::make_executable;
+
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
@@ -139,14 +142,6 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
     }
-}
-
-fn make_executable(path: &std::path::Path) {
-    let mut permissions = fs::metadata(path)
-        .expect("read executable metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("make fixture executable");
 }
 
 #[test]
