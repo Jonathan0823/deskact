@@ -23,6 +23,8 @@ const INSTALL_GUIDANCE: &str = "Install the required version from Windows PowerS
 pub(crate) const NATIVE_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 /// Pause between attempts of a deadline poll.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Smallest remaining budget with which a retry attempt may start.
+const MIN_ATTEMPT_BUDGET: Duration = Duration::from_millis(250);
 
 /// Failure to start a subprocess or complete it before the native-operation deadline.
 #[derive(Debug)]
@@ -33,26 +35,28 @@ pub(crate) enum CommandRunError {
 
 /// Retry `attempt` every 100 ms until it yields a value or `deadline` passes.
 ///
-/// `attempt` always runs at least once and receives the time left (never zero); it returns `Ok(None)` to poll again.
-/// When the deadline is reached without a value, `on_timeout` decides the outcome; it
+/// The first `attempt` always runs and receives the time left (never zero); it returns `Ok(None)` to poll again.
+/// No later attempt starts with less than `MIN_ATTEMPT_BUDGET` left, because a nearly expired
+/// subprocess budget fails with a subprocess timeout instead of the caller's readiness message.
+/// When polling stops without a value, `on_timeout` decides the outcome; it
 /// may still produce a value, so callers can fall back to the last observed state.
 pub(crate) fn poll_until_deadline<T>(
     deadline: Instant,
     mut attempt: impl FnMut(Duration) -> Result<Option<T>, DeskActError>,
     on_timeout: impl FnOnce() -> Result<T, DeskActError>,
 ) -> Result<T, DeskActError> {
+    let mut first = true;
     loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !first && remaining < MIN_ATTEMPT_BUDGET {
+            return on_timeout();
+        }
+        first = false;
         // Always attempt at least once, even when the deadline passed before entry.
-        let remaining = deadline
-            .saturating_duration_since(Instant::now())
-            .max(Duration::from_millis(1));
-        if let Some(value) = attempt(remaining)? {
+        if let Some(value) = attempt(remaining.max(Duration::from_millis(1)))? {
             return Ok(value);
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return on_timeout();
-        }
         thread::sleep(POLL_INTERVAL.min(remaining));
     }
 }
@@ -170,7 +174,20 @@ impl VerifiedNativeCli {
 
     /// List fresh windows matching an app label using the verified CLI connection.
     pub(crate) fn windows_for_app(&self, app: &str) -> Result<Vec<NativeWindow>, DeskActError> {
-        let output = self.invoke_args(&["list-windows", "--app", app], "list-windows")?;
+        self.windows_for_app_with_timeout(app, NATIVE_PROCESS_TIMEOUT)
+    }
+
+    /// List fresh windows matching an app label while respecting a caller's remaining deadline.
+    pub(crate) fn windows_for_app_with_timeout(
+        &self,
+        app: &str,
+        timeout: Duration,
+    ) -> Result<Vec<NativeWindow>, DeskActError> {
+        let output = self.invoke_args_with_timeout(
+            &["list-windows", "--app", app],
+            "list-windows",
+            timeout,
+        )?;
         let envelope: Envelope<Vec<NativeWindow>> = parse_envelope(&output, "list-windows")?;
         if envelope.version != SUPPORTED_JSON_CONTRACT_VERSION {
             return Err(DeskActError(format!(
@@ -992,15 +1009,33 @@ mod tests {
         let started = Instant::now();
 
         let error = poll_until_deadline::<()>(
-            started + Duration::from_millis(250),
+            started + Duration::from_millis(600),
             |_| Ok(None),
             || Err(DeskActError("timed out".into())),
         )
         .expect_err("nothing becomes ready");
 
         assert_eq!(error.to_string(), "timed out");
-        assert!(started.elapsed() >= Duration::from_millis(250));
+        assert!(started.elapsed() >= Duration::from_millis(300));
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// A retry is not started when less than the minimum attempt budget remains.
+    #[test]
+    fn poll_does_not_start_a_later_attempt_with_a_tiny_budget() {
+        let mut calls = 0;
+        let value = poll_until_deadline(
+            Instant::now() + Duration::from_millis(150),
+            |_| -> Result<Option<u8>, DeskActError> {
+                calls += 1;
+                Ok(None)
+            },
+            || Ok(9),
+        )
+        .expect("timeout fallback");
+
+        assert_eq!(value, 9);
+        assert_eq!(calls, 1);
     }
 
     /// The timeout outcome may supply a fallback value after one attempt on an already-passed deadline.

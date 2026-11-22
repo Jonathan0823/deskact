@@ -67,8 +67,8 @@ pub fn run_file_explorer_acceptance() -> Result<(), DeskActError> {
             }
             windows = poll_until_deadline(
                 Instant::now() + APP_READINESS_TIMEOUT,
-                |_| {
-                    let windows = cli.windows_for_app("explorer")?;
+                |remaining| {
+                    let windows = cli.windows_for_app_with_timeout("explorer", remaining)?;
                     Ok((!windows.is_empty()).then_some(windows))
                 },
                 || Ok(Vec::new()),
@@ -416,12 +416,13 @@ pub fn run_vlc_acceptance() -> Result<(), DeskActError> {
             .filter(|window| executable_stem(&window.app_name).eq_ignore_ascii_case("vlc"))
             .map(|window| window.id)
             .collect();
-        launched_pid = Some(launch_vlc(&media, &config)?);
+        let pid = launch_vlc(&media, &config)?;
+        launched_pid = Some(pid);
         let fixture_name = media
             .file_name()
             .and_then(OsStr::to_str)
             .ok_or_else(|| DeskActError("VLC fixture filename is not Unicode".into()))?;
-        let window = wait_for_new_vlc_window(&cli, &existing_ids, fixture_name)?;
+        let window = wait_for_new_vlc_window(&cli, &existing_ids, fixture_name, pid)?;
         validate_vlc_window(&window)?;
         selected_window = Some(window.clone());
 
@@ -456,6 +457,7 @@ pub fn run_vlc_acceptance() -> Result<(), DeskActError> {
     let close_result = selected_window
         .as_ref()
         .map_or(Ok(()), |window| close_test_vlc_window(&cli, window));
+    let process_cleanup = launched_pid.map_or(Ok(()), |pid| stop_owned_vlc_process(pid, &media));
     let directory_cleanup = match fs::remove_dir_all(&directory) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -463,7 +465,6 @@ pub fn run_vlc_acceptance() -> Result<(), DeskActError> {
             "Could not remove test-created VLC fixture workspace: {error}"
         ))),
     };
-    let process_cleanup = launched_pid.map_or(Ok(()), |pid| stop_owned_vlc_process(pid, &media));
     let cleanup = combine_cleanup_results([close_result, process_cleanup, directory_cleanup]);
     match (result, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
@@ -511,30 +512,24 @@ fn write_silent_wav(path: &Path) -> Result<(), DeskActError> {
 fn launch_vlc(media: &Path, config: &Path) -> Result<u32, DeskActError> {
     let media_path = native_ui_path(media)?;
     let config_path = native_ui_path(config)?;
-    let executable = env::var("DESKACT_VLC_EXECUTABLE").unwrap_or_default();
-    let script = format!(
-        r#"
+    let script = r#"
 $ErrorActionPreference = 'Stop'
-$exe = {}
-if ([string]::IsNullOrWhiteSpace($exe)) {{
-    $roots = @($env:ProgramFiles, ${{env:ProgramFiles(x86)}}) | Where-Object {{ $_ }}
-    $matches = @($roots | ForEach-Object {{ Join-Path $_ 'VideoLAN\VLC\vlc.exe' }} | Where-Object {{ Test-Path -LiteralPath $_ -PathType Leaf }})
-    if ($matches.Count -ne 1) {{ throw 'Could not identify one VLC executable in the standard VideoLAN install locations' }}
+$exe = $env:DESKACT_VLC_EXECUTABLE
+if ([string]::IsNullOrWhiteSpace($exe)) {
+    $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+    $matches = @($roots | ForEach-Object { Join-Path $_ 'VideoLAN\VLC\vlc.exe' } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+    if ($matches.Count -ne 1) { throw 'Could not identify one VLC executable in the standard VideoLAN install locations' }
     $exe = $matches[0]
-}}
-if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {{ throw 'Configured VLC executable does not exist' }}
-$config = {}
-$media = {}
+}
+if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Configured VLC executable does not exist' }
+$config = $env:DESKACT_VLC_CONFIG
+$media = $env:DESKACT_VLC_MEDIA
 $arguments = '--no-one-instance --no-qt-privacy-ask --no-qt-recentplay --no-metadata-network-access --no-qt-updates-notif --config="' + $config + '" "' + $media + '"'
 $process = Start-Process -FilePath $exe -ArgumentList $arguments -PassThru
 Write-Output "DESKACT_VLC_PID=$($process.Id)"
-"#,
-        powershell_literal(&executable),
-        powershell_literal(&config_path),
-        powershell_literal(&media_path)
-    );
+"#;
     let output = run_powershell(PowerShellRun {
-        script: &script,
+        script,
         non_interactive: true,
         capture_output: true,
         envs: &[
@@ -566,7 +561,7 @@ fn stop_owned_vlc_process(pid: u32, media: &Path) -> Result<(), DeskActError> {
         r#"
 $ErrorActionPreference = 'Stop'
 $pidToStop = {pid}
-$media = {}
+$media = $env:DESKACT_VLC_MEDIA
 $process = Get-CimInstance Win32_Process -Filter "ProcessId=$pidToStop"
 if ($null -eq $process) {{ exit 0 }}
 if ([IO.Path]::GetFileName($process.ExecutablePath) -ine 'vlc.exe' -or -not $process.CommandLine.Contains($media)) {{
@@ -574,13 +569,12 @@ if ([IO.Path]::GetFileName($process.ExecutablePath) -ine 'vlc.exe' -or -not $pro
 }}
 Stop-Process -Id $pidToStop -Force
 "#,
-        powershell_literal(&media_path)
     );
     let output = run_powershell(PowerShellRun {
         script: &script,
         non_interactive: true,
         capture_output: false,
-        envs: &[],
+        envs: &[("DESKACT_VLC_MEDIA", &media_path)],
         action: &format!("stop DeskAct-owned VLC process {pid}"),
         timeout_message: format!("Timed out while stopping DeskAct-owned VLC process {pid}"),
     })?;
@@ -609,16 +603,12 @@ fn combine_cleanup_results<const N: usize>(
     }
 }
 
-/// Escape one value as a PowerShell single-quoted string literal.
-fn powershell_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
 /// Wait for one newly-created, accessible VLC window associated with the controlled fixture.
 fn wait_for_new_vlc_window(
     cli: &VerifiedNativeCli,
     existing_ids: &HashSet<String>,
     fixture_name: &str,
+    launched_pid: u32,
 ) -> Result<NativeWindow, DeskActError> {
     let timed_out = || {
         DeskActError(
@@ -628,14 +618,12 @@ fn wait_for_new_vlc_window(
     poll_until_deadline(
         Instant::now() + APP_READINESS_TIMEOUT,
         |remaining| {
-            if remaining < Duration::from_millis(250) {
-                return Err(timed_out());
-            }
             let windows: Vec<_> = cli
                 .all_windows_with_timeout(remaining)?
                 .into_iter()
                 .filter(|window| {
                     executable_stem(&window.app_name).eq_ignore_ascii_case("vlc")
+                        && window.pid == launched_pid
                         && window.title.contains(fixture_name)
                         && !existing_ids.contains(&window.id)
                 })
@@ -1241,13 +1229,16 @@ fn run_notepad_scenario_inner(
                             .into(),
                     ));
                 }
-                let save_button = snapshot::unique_control(
-                    &save_snapshot,
-                    "button",
-                    Some("Save"),
-                    "Save button",
-                )?;
-                cli.invoke_success(&["click", snapshot::control_ref(save_button)?], "click")?;
+                // The earlier save may have completed while the fresh snapshot was taken; do not click again.
+                if fs::symlink_metadata(&artifacts.file).is_err() {
+                    let save_button = snapshot::unique_control(
+                        &save_snapshot,
+                        "button",
+                        Some("Save"),
+                        "Save button",
+                    )?;
+                    cli.invoke_success(&["click", snapshot::control_ref(save_button)?], "click")?;
+                }
                 if wait_for_saved_contents(
                     cli,
                     &original,
@@ -1315,6 +1306,8 @@ fn wait_for_saved_contents(
     poll_until_deadline(
         Instant::now() + timeout,
         |_| {
+            // Observe windows first so a closed dialog is followed by a file read that reflects the completed save.
+            let windows = cli.windows_for_app("notepad")?;
             let file_exists = match fs::symlink_metadata(path) {
                 Ok(metadata) if metadata.file_type().is_file() => true,
                 Ok(_) => {
@@ -1341,7 +1334,6 @@ fn wait_for_saved_contents(
             } else {
                 false
             };
-            let windows = cli.windows_for_app("notepad")?;
             let original_present = windows.iter().any(|window| {
                 window.id == original.id
                     && window.accessible

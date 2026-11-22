@@ -48,7 +48,7 @@ case "$1" in
  list-windows)
   if [ -f "$DESKACT_TEST_CLOSED" ]; then
    if [ "$DESKACT_TEST_MODE" = existing-user ]; then printf '{"version":"2.6","ok":true,"command":"list-windows","data":[%s]}\n' "$(user_window)"; else echo '{"version":"2.6","ok":true,"command":"list-windows","data":[]}'; fi
-  elif grep -q '^powershell-launch ' "$DESKACT_TEST_CALLS" && [ "$DESKACT_TEST_MODE" = ambiguous ]; then title=$(fixture_title); printf '{"version":"2.6","ok":true,"command":"list-windows","data":[{"id":"vlc-window","title":"%s","app_name":"vlc.exe","accessible":true,"minimized":false,"visible":true,"pid":9876},{"id":"vlc-window-2","title":"%s","app_name":"vlc.exe","accessible":true,"minimized":false,"visible":true,"pid":9877}]}\n' "$title" "$title"
+  elif grep -q '^powershell-launch ' "$DESKACT_TEST_CALLS" && [ "$DESKACT_TEST_MODE" = ambiguous ]; then title=$(fixture_title); printf '{"version":"2.6","ok":true,"command":"list-windows","data":[{"id":"vlc-window","title":"%s","app_name":"vlc.exe","accessible":true,"minimized":false,"visible":true,"pid":9876},{"id":"vlc-window-2","title":"%s","app_name":"vlc.exe","accessible":true,"minimized":false,"visible":true,"pid":9876}]}\n' "$title" "$title"
   elif grep -q '^powershell-launch ' "$DESKACT_TEST_CALLS"; then
    if [ "$DESKACT_TEST_MODE" = existing-user ]; then printf '{"version":"2.6","ok":true,"command":"list-windows","data":[%s,%s]}\n' "$(user_window)" "$(fixture_window)"; else printf '{"version":"2.6","ok":true,"command":"list-windows","data":[%s]}\n' "$(fixture_window)"; fi
   elif [ "$DESKACT_TEST_MODE" = existing-user ]; then printf '{"version":"2.6","ok":true,"command":"list-windows","data":[%s]}\n' "$(user_window)"
@@ -73,14 +73,15 @@ esac
             r##"#!/bin/sh
 case "$*" in
  *Stop-Process*)
-  case "$*" in *9876*"$DESKACT_VLC_MEDIA"*) ;; *) echo 'VLC cleanup did not target the launched PID and fixture' >&2; exit 2 ;; esac
+  case "$*" in *9876*'$env:DESKACT_VLC_MEDIA'*) ;; *) echo 'VLC cleanup did not target the launched PID and fixture' >&2; exit 2 ;; esac
+  [ -f "$DESKACT_VLC_MEDIA" ] || { echo 'VLC cleanup was not given the fixture path' >&2; exit 2; }
   touch "$DESKACT_TEST_KILLED" ;;
  *Win32_Process*) printf '%s\n' 'C:\Program Files\VideoLAN\VLC\vlc.exe' ;;
  *Start-Process*)
   [ -f "$DESKACT_VLC_MEDIA" ] || { echo 'VLC fixture is missing' >&2; exit 2; }
   [ "$(dd if="$DESKACT_VLC_MEDIA" bs=4 count=1 2>/dev/null)" = RIFF ] || { echo 'VLC fixture is not a WAV file' >&2; exit 2; }
-  case "$*" in *"$DESKACT_VLC_CONFIG"*) ;; *) echo 'VLC config path was not isolated under the workspace' >&2; exit 2 ;; esac
-  case "$*" in *"$DESKACT_VLC_MEDIA"*) ;; *) echo 'VLC was not passed the generated fixture path' >&2; exit 2 ;; esac
+  [ -n "$DESKACT_VLC_CONFIG" ] && case "$*" in *'$env:DESKACT_VLC_CONFIG'*) true ;; *) false ;; esac || { echo 'VLC config path was not isolated under the workspace' >&2; exit 2; }
+  case "$*" in *'$env:DESKACT_VLC_MEDIA'*) ;; *) echo 'VLC was not passed the generated fixture path' >&2; exit 2 ;; esac
   case "$*" in *'--config="'*) ;; *) echo 'VLC was not passed its isolated config option' >&2; exit 2 ;; esac
   printf 'powershell-launch %s\n' "$*" >> "$DESKACT_TEST_CALLS"
   printf '%s\n' "$DESKACT_VLC_MEDIA" > "$DESKACT_TEST_MEDIA_CAPTURE"
