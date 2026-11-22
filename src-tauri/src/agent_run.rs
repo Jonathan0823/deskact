@@ -245,7 +245,7 @@ impl<R: BufRead, W: Write> ConsolePrompts<R, W> {
     }
 }
 
-fn describe_step(step: &AgentStep) -> String {
+pub(crate) fn describe_step(step: &AgentStep) -> String {
     match step {
         AgentStep::Click {
             element_name,
