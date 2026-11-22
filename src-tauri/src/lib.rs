@@ -18,8 +18,10 @@ pub use app_catalog::{
 };
 mod llm;
 pub use llm::{
-    ActionPlan, ActionPlanStep, LlmConnectionReport, request_action_plan,
-    request_action_plan_with_context, test_llm_connection, validate_action_plan_json,
+    ActionPlan, ActionPlanStep, AgentTool, AgentTurn, LlmConnectionReport, ToolCallProposal,
+    agent_tool_definitions, parse_tool_calls, request_action_plan,
+    request_action_plan_with_context, request_agent_turn, test_llm_connection,
+    validate_action_plan_json,
 };
 mod execution;
 pub use execution::{

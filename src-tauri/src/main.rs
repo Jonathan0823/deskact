@@ -11,9 +11,9 @@ use deskact_core::{
     CancellationToken, ChatCompletionsPlanner, DeskActError, DiscoveredApp, ManualRestorePrompt,
     NativeActionAdapter, NativeTargetResolution, NativeWindow, TaskCoordinator, VerifiedNativeCli,
     add_user_app_entry, edit_user_app_entry, load_app_catalog, native_inventory, preflight,
-    prepare_app_selection, request_action_plan, resolve_native_target, run_calculator_acceptance,
-    run_file_explorer_acceptance, run_notepad_acceptance, run_task, run_vlc_acceptance,
-    simulate_approval_scenario, simulate_task_scenario, test_llm_connection,
+    prepare_app_selection, request_action_plan, request_agent_turn, resolve_native_target,
+    run_calculator_acceptance, run_file_explorer_acceptance, run_notepad_acceptance, run_task,
+    run_vlc_acceptance, simulate_approval_scenario, simulate_task_scenario, test_llm_connection,
     validate_action_plan_json,
 };
 
@@ -151,7 +151,7 @@ fn main() -> ExitCode {
 
         _ => {
             eprintln!(
-                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|llm <test|plan <request>|validate-plan>|task <simulate --scenario <name>|approval-simulate --scenario <name>|execute --request <request>>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
+                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|llm <test|tool-turn <request>|plan <request>|validate-plan>|task <simulate --scenario <name>|approval-simulate --scenario <name>|execute --request <request>>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
             );
             ExitCode::from(2)
         }
@@ -357,10 +357,21 @@ fn run_llm_command(arguments: &[String]) -> ExitCode {
                 } else {
                     "authentication not configured"
                 };
+                let tool_calling = if report.tool_calling_supported {
+                    "tool calling supported"
+                } else {
+                    "tool calling not detected (agent-loop tasks unavailable; opening apps still works)"
+                };
             format!(
-                "LLM connection test: endpoint reachable; {authentication}; response content received; this does not guarantee action-plan compatibility."
+                "LLM connection test: endpoint reachable; {authentication}; response content received; {tool_calling}; this does not guarantee action-plan compatibility."
             )
         }),
+        [command, request @ ..] if command == "tool-turn" && !request.is_empty() => {
+            let messages = vec![serde_json::json!({"role": "user", "content": request.join(" ")})];
+            run_llm_async(request_agent_turn(messages)).map(|turn| {
+                format!("{:#?}", (turn.tool_calls, turn.content))
+            })
+        }
         [command, request @ ..] if command == "plan" && !request.is_empty() => {
             let request = request.join(" ");
             run_llm_async(request_action_plan(&request)).and_then(|plan| {
@@ -382,7 +393,7 @@ fn run_llm_command(arguments: &[String]) -> ExitCode {
         }
         _ => {
             eprintln!(
-                "Usage: deskact-dev llm <test|plan <request>|validate-plan --response-json <json>>"
+                "Usage: deskact-dev llm <test|tool-turn <request>|plan <request>|validate-plan --response-json <json>>"
             );
             return ExitCode::from(2);
         }
