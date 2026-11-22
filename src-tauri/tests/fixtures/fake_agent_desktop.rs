@@ -1,4 +1,4 @@
-use std::{env, fs::OpenOptions, io::Write, path::Path};
+use std::{env, fs, fs::OpenOptions, io::Write, path::Path};
 
 /// Emit fixture responses for the native CLI and the PowerShell process/catalog probes.
 fn main() {
@@ -18,7 +18,19 @@ fn main() {
             let minimized = env::var("DESKACT_TEST_MINIMIZED").unwrap_or_else(|_| "false".into());
             println!(r#"{{"version":"2.6","ok":true,"command":"list-windows","data":[{{"id":"fixture-window","title":"Calculator","app_name":"Calculator.exe","accessible":{accessible},"minimized":{minimized},"is_focused":false,"visible":true,"pid":4512}}]}}"#);
         }
-        Some("snapshot") => println!(r#"{{"version":"2.6","ok":true,"command":"snapshot","data":{{"window":{{"id":"fixture-window"}},"complete":true,"ref_count":1,"snapshot_id":"fixture-snapshot","tree":{{"role":"window","children":[]}}}}}}"#),
+        Some("snapshot") => match scenario("snapshot.json") {
+            Some(data) => println!(r#"{{"version":"2.6","ok":true,"command":"snapshot","data":{data}}}"#),
+            None => println!(r#"{{"version":"2.6","ok":true,"command":"snapshot","data":{{"window":{{"id":"fixture-window"}},"complete":true,"ref_count":1,"snapshot_id":"fixture-snapshot","tree":{{"role":"window","children":[]}}}}}}"#),
+        },
+        Some(command @ ("click" | "set-value" | "press")) => println!(r#"{{"version":"2.6","ok":true,"command":"{command}","data":{{"done":true}}}}"#),
+        Some("get") => {
+            let value = scenario("value.json").unwrap_or_else(|| "\"\"".into());
+            println!(r#"{{"version":"2.6","ok":true,"command":"get","data":{{"value":{value}}}}}"#);
+        }
+        Some("focus-window") => {
+            let focused = scenario("focused.json").unwrap_or_else(|| "true".into());
+            println!(r#"{{"version":"2.6","ok":true,"command":"focus-window","data":{{"focused":{{"id":"fixture-window","is_focused":{focused}}}}}}}"#);
+        }
         _ => {
             eprintln!("unexpected fake agent-desktop arguments: {arguments:?}");
             std::process::exit(2);
@@ -38,9 +50,20 @@ fn run_powershell_fixture(arguments: &[String]) {
     }
 }
 
+/// Read a per-test scenario file stored beside this executable, if the test wrote one.
+fn scenario(name: &str) -> Option<String> {
+    let directory = env::current_exe().ok()?.parent()?.to_path_buf();
+    fs::read_to_string(directory.join(name)).ok()
+}
+
 /// Append the received argument vector to the test-owned call log.
+///
+/// The log is `DESKACT_TEST_CALLS`, or a `calls.log` beside this executable when the test created one.
 fn log_invocation(arguments: &[String]) {
-    let Some(path) = env::var_os("DESKACT_TEST_CALLS") else {
+    let Some(path) = env::var_os("DESKACT_TEST_CALLS").or_else(|| {
+        let beside = env::current_exe().ok()?.parent()?.join("calls.log");
+        beside.exists().then(|| beside.into_os_string())
+    }) else {
         return;
     };
     let mut file = OpenOptions::new()

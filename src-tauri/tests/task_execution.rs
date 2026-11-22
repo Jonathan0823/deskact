@@ -73,6 +73,10 @@ impl ChatEndpoint {
                     Err(error) => panic!("accept model request: {error}"),
                 }
             };
+            // Windows accepted sockets inherit the listener's non-blocking mode.
+            stream
+                .set_nonblocking(false)
+                .expect("blocking model fixture stream");
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("bound model fixture read");
@@ -312,7 +316,7 @@ fn unresolved_task_report_returns_nonzero_status() {
     assert_eq!(report["unresolved_steps"].as_array().unwrap().len(), 1);
 }
 
-/// Verify compound requests are rejected before making a model request or native call.
+/// Verify compound requests leave the open-app fast path and, without a target app, make no model or native call.
 #[test]
 fn compound_request_is_rejected_before_model_planning() {
     let directory = FixtureDirectory::new();
@@ -331,10 +335,7 @@ fn compound_request_is_rejected_before_model_planning() {
     );
 
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("compound or other requests are unsupported")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--app <name>"));
     let calls = fs::read_to_string(directory.path().join("native-calls.log"))
         .expect("native CLI invocation log");
     assert!(!calls.lines().any(|line| line == "version"), "{calls}");

@@ -18,8 +18,10 @@ pub use app_catalog::{
 };
 mod llm;
 pub use llm::{
-    ActionPlan, ActionPlanStep, LlmConnectionReport, request_action_plan,
-    request_action_plan_with_context, test_llm_connection, validate_action_plan_json,
+    ActionPlan, ActionPlanStep, AgentTool, AgentTurn, LlmConnectionReport, ToolCallProposal,
+    agent_tool_definitions, parse_tool_calls, request_action_plan,
+    request_action_plan_with_context, request_agent_turn, test_llm_connection,
+    validate_action_plan_json,
 };
 mod execution;
 pub use execution::{
@@ -44,10 +46,33 @@ pub(crate) use native::{
 };
 pub use native::{VerifiedNativeCli, native_inventory, preflight, resolve_native_target};
 mod acceptance;
+mod agent_loop;
+mod agent_tools;
 mod snapshot;
+mod step_policy;
 pub use acceptance::{
     NotepadAcceptanceReport, run_calculator_acceptance, run_file_explorer_acceptance,
     run_notepad_acceptance, run_vlc_acceptance,
+};
+pub use agent_loop::{
+    AGENT_TOOL_PROMPT, AgentBudget, AgentDesktop, AgentLoopReport, AgentModel, AgentOutcome,
+    BudgetLimit, ChatCompletionsAgentModel, DesktopCall, DesktopObserver, MAX_EXECUTED_TOOL_CALLS,
+    MAX_MODEL_TURNS, MAX_TASK_DURATION, ObservedDesktop, UserAnswers, frame_untrusted,
+    run_agent_loop, run_agent_loop_with_answers,
+};
+mod agent_gate;
+pub use agent_gate::{
+    ApprovalExpectation, ApprovalRecord, GATE_RUNS_PER_TASK, GateConfig, GateEnvironment,
+    GateReport, GateRunRecord, GateTask, gate_tasks, run_gate, run_gate_with,
+};
+mod agent_run;
+pub use agent_run::{
+    AgentTaskReport, ConsolePrompts, Expectation, ProgressLog, ReportingDesktop, TaskRoute,
+    Verification, route_request, run_agent_task,
+};
+pub use agent_tools::{OBSERVATION_BYTE_CAP, Observation, TargetWindowTools};
+pub use step_policy::{
+    AgentStep, StepApprover, StepClass, StepFlag, StepGate, StepRisk, classify_step, gate_step,
 };
 
 /// Exact `agent-desktop` release required for native CLI operations.
