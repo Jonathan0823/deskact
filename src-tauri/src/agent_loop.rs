@@ -146,6 +146,27 @@ impl AgentDesktop for TargetWindowTools {
     }
 }
 
+/// Source of user answers to `ask_user` questions (console in the dev harness, island later).
+pub trait UserAnswers {
+    /// Show the question; return the answer, or `None` when the user gives none (the run then ends).
+    fn answer(&mut self, question: &str) -> Option<String>;
+}
+
+/// Adds "never answers" to an approver: `ask_user` then ends the run with `AgentOutcome::AskedUser`.
+struct ApproveOnly<'a, A>(&'a mut A);
+
+impl<A: StepApprover> StepApprover for ApproveOnly<'_, A> {
+    fn approve(&mut self, step: &AgentStep, reason: &str) -> bool {
+        self.0.approve(step, reason)
+    }
+}
+
+impl<A> UserAnswers for ApproveOnly<'_, A> {
+    fn answer(&mut self, _question: &str) -> Option<String> {
+        None
+    }
+}
+
 /// Wrap on-screen text so the model sees it as data; the closing tag cannot be forged from inside.
 pub fn frame_untrusted(content: &str) -> String {
     let safe = content.replace(UNTRUSTED_CLOSE, "<\\/untrusted_window_content>");
@@ -309,15 +330,37 @@ fn tool_message(id: &str, content: String) -> Value {
     json!({"role": "tool", "tool_call_id": id, "content": content})
 }
 
-/// Run the loop for one request against one verified target window.
-///
-/// Starts with an observation (an executed tool call), then alternates model turns and gated tool
-/// execution. Tool errors are returned to the model as results; model transport errors end the run.
+/// Run the loop with no way to answer `ask_user`; see `run_agent_loop_with_answers`.
 pub async fn run_agent_loop(
     request: &str,
     model: &mut impl AgentModel,
     desktop: &mut impl AgentDesktop,
     approver: &mut impl StepApprover,
+    cancellation: &CancellationToken,
+    budget: AgentBudget,
+) -> Result<AgentLoopReport, DeskActError> {
+    run_agent_loop_with_answers(
+        request,
+        model,
+        desktop,
+        &mut ApproveOnly(approver),
+        cancellation,
+        budget,
+    )
+    .await
+}
+
+/// Run the loop for one request against one verified target window.
+///
+/// An answered `ask_user` continues the same conversation and budget; an unanswered one ends the run.
+///
+/// Starts with an observation (an executed tool call), then alternates model turns and gated tool
+/// execution. Tool errors are returned to the model as results; model transport errors end the run.
+pub async fn run_agent_loop_with_answers(
+    request: &str,
+    model: &mut impl AgentModel,
+    desktop: &mut impl AgentDesktop,
+    user: &mut (impl StepApprover + UserAnswers),
     cancellation: &CancellationToken,
     budget: AgentBudget,
 ) -> Result<AgentLoopReport, DeskActError> {
@@ -359,9 +402,17 @@ pub async fn run_agent_loop(
                 "Respond with a tool call. Use finish when the task is done or ask_user if blocked."}));
             continue;
         }
+        let mut asked = false;
         for call in turn.tool_calls {
             if cancellation.is_cancelled() {
                 return Ok(report(AgentOutcome::Cancelled, turns, calls));
+            }
+            if asked {
+                messages.push(tool_message(
+                    &call.id,
+                    "skipped: not run because the user was asked a question first".into(),
+                ));
+                continue;
             }
             match &call.tool {
                 AgentTool::Finish { summary } => {
@@ -371,6 +422,11 @@ pub async fn run_agent_loop(
                     return Ok(report(outcome, turns, calls));
                 }
                 AgentTool::AskUser { question } => {
+                    if let Some(answer) = user.answer(question) {
+                        messages.push(tool_message(&call.id, format!("User answered: {answer}")));
+                        asked = true;
+                        continue;
+                    }
                     let outcome = AgentOutcome::AskedUser {
                         question: question.clone(),
                     };
@@ -382,7 +438,7 @@ pub async fn run_agent_loop(
                 return Ok(report(AgentOutcome::BudgetExhausted(limit), turns, calls));
             }
             if let Some(step) = step_for(&call.tool, desktop, &elements)
-                && gate_step(&step, approver) == StepGate::StoppedByUser
+                && gate_step(&step, user) == StepGate::StoppedByUser
             {
                 return Ok(report(AgentOutcome::StoppedByUser, turns, calls));
             }
