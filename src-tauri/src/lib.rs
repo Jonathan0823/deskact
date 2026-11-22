@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 mod approval;
 pub use approval::{
-    ActionRiskClass, ActionScope, ApprovalDecision, ApprovalGrant, ApprovalRequest,
+    ActionAdapter, ActionRiskClass, ActionScope, ApprovalDecision, ApprovalGrant, ApprovalRequest,
     ApprovalSimulationReport, authorize_action, classify_action, explicitly_approve,
     request_approval, simulate_approval_scenario,
 };
@@ -34,15 +34,16 @@ pub use llm::{
 };
 mod execution;
 pub use execution::{
-    PreparedTask, TaskExecutionEvidence, TaskExecutionReport, execute_action_plan,
-    execute_prepared_task, model_candidate_context, open_app_plan, prepare_task_request,
-    registered_open_workflow, validate_open_app_request,
+    NativeActionAdapter, PreparedTask, TaskExecutionEvidence, TaskExecutionReport,
+    execute_prepared_task, model_candidate_context, open_app_plan, registered_open_workflow,
+    validate_open_app_request,
 };
 mod task;
 pub use task::{
-    CancellationToken, DeliveryDisposition, MutationLease, PostconditionState, RecoveryDecision,
-    TaskCoordinator, TaskSimulationReport, may_resume_after_interference, recovery_decision,
-    requires_fresh_observation, simulate_task_scenario,
+    ActionPlanner, CancellationToken, ChatCompletionsPlanner, DeliveryDisposition,
+    ManualRestorePrompt, MutationLease, PostconditionState, RecoveryDecision, TaskCoordinator,
+    TaskSimulationReport, may_resume_after_interference, prepare_task_request, recovery_decision,
+    requires_fresh_observation, run_task, simulate_task_scenario,
 };
 mod windows_catalog;
 pub use windows_catalog::{

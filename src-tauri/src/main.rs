@@ -8,12 +8,13 @@ use std::{
 };
 
 use deskact_core::{
-    AppCatalogEntry, DeskActError, NativeTargetResolution, TaskExecutionReport, VerifiedNativeCli,
-    add_user_app_entry, edit_user_app_entry, execute_prepared_task, load_app_catalog,
-    native_inventory, preflight, prepare_app_selection, prepare_task_request, request_action_plan,
-    resolve_native_target, run_calculator_acceptance, run_file_explorer_acceptance,
-    run_notepad_acceptance, run_vlc_acceptance, simulate_approval_scenario, simulate_task_scenario,
-    test_llm_connection, validate_action_plan_json,
+    CancellationToken, ChatCompletionsPlanner, DeskActError, DiscoveredApp, ManualRestorePrompt,
+    NativeActionAdapter, NativeTargetResolution, NativeWindow, TaskCoordinator, VerifiedNativeCli,
+    add_user_app_entry, edit_user_app_entry, load_app_catalog, native_inventory, preflight,
+    prepare_app_selection, request_action_plan, resolve_native_target, run_calculator_acceptance,
+    run_file_explorer_acceptance, run_notepad_acceptance, run_task, run_vlc_acceptance,
+    simulate_approval_scenario, simulate_task_scenario, test_llm_connection,
+    validate_action_plan_json,
 };
 
 /// Run the developer-only native preflight, inventory, target-resolution, or acceptance command.
@@ -278,7 +279,15 @@ fn run_task_command(arguments: &[String]) -> ExitCode {
 
     if arguments.len() >= 3 && arguments[0] == "execute" && arguments[1] == "--request" {
         let request = arguments[2..].join(" ");
-        return match run_task_async(execute_task_request(&request)) {
+        return match run_task_async(run_task(
+            &request,
+            load_app_catalog,
+            &ChatCompletionsPlanner,
+            &mut NativeActionAdapter::default(),
+            &mut StdinRestorePrompt,
+            &TaskCoordinator::default(),
+            &CancellationToken::default(),
+        )) {
             Ok(report) => match serde_json::to_string_pretty(&report) {
                 Ok(report_json) => {
                     println!("{report_json}");
@@ -300,51 +309,29 @@ fn run_task_command(arguments: &[String]) -> ExitCode {
     ExitCode::from(2)
 }
 
-/// Validate task scope, route exact app matches locally, and execute a validated supported plan.
-async fn execute_task_request(request: &str) -> Result<TaskExecutionReport, DeskActError> {
-    let prepared = prepare_task_request(request).await?;
-    let mut cli = None;
-    execute_prepared_task(prepared, |entry| {
-        if cli.is_none() {
-            cli = Some(VerifiedNativeCli::connect()?);
-        }
-        resolve_task_target(cli.as_ref().expect("CLI initialized"), entry)
-    })
-}
+/// Manual-restore prompt that asks on stderr and reads the answer from stdin, keeping stdout JSON-only.
+struct StdinRestorePrompt;
 
-/// Resolve an app target and wait for manual restoration before fresh enumeration if minimized.
-fn resolve_task_target(
-    cli: &VerifiedNativeCli,
-    entry: &AppCatalogEntry,
-) -> Result<NativeTargetResolution, DeskActError> {
-    let mut resolution = cli.resolve_target(entry.as_discovered_app())?;
-    loop {
-        match resolution {
-            NativeTargetResolution::Ready(target) => {
-                return Ok(NativeTargetResolution::Ready(target));
-            }
-            NativeTargetResolution::NeedsManualRestore { app, window } => {
-                eprint!(
-                    "Window `{}` for {} is minimized. Restore it manually, then press Enter to re-enumerate (or type q to cancel): ",
-                    window.title, app.name
-                );
-                if io::stderr().flush().is_err() {
-                    return Err(DeskActError::new(
-                        "Could not write the restore prompt".into(),
-                    ));
-                }
-                let mut response = String::new();
-                let bytes_read = io::stdin().read_line(&mut response).map_err(|_| {
-                    DeskActError::new("Could not read the restore confirmation".into())
-                })?;
-                if bytes_read == 0 || response.trim().eq_ignore_ascii_case("q") {
-                    return Err(DeskActError::new(
-                        "Resolution cancelled; no window was selected".into(),
-                    ));
-                }
-                resolution = cli.resume_after_manual_restore(app)?;
-            }
+impl ManualRestorePrompt for StdinRestorePrompt {
+    fn confirm_restored(
+        &mut self,
+        app: &DiscoveredApp,
+        window: &NativeWindow,
+    ) -> Result<bool, DeskActError> {
+        eprint!(
+            "Window `{}` for {} is minimized. Restore it manually, then press Enter to re-enumerate (or type q to cancel): ",
+            window.title, app.name
+        );
+        if io::stderr().flush().is_err() {
+            return Err(DeskActError::new(
+                "Could not write the restore prompt".into(),
+            ));
         }
+        let mut response = String::new();
+        let bytes_read = io::stdin()
+            .read_line(&mut response)
+            .map_err(|_| DeskActError::new("Could not read the restore confirmation".into()))?;
+        Ok(bytes_read != 0 && !response.trim().eq_ignore_ascii_case("q"))
     }
 }
 
