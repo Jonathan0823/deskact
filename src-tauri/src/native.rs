@@ -118,7 +118,12 @@ pub struct VerifiedNativeCli {
 impl VerifiedNativeCli {
     /// Connect to the configured executable after validating its version and platform.
     pub fn connect() -> Result<Self, DeskActError> {
-        let executable = configured_executable();
+        Self::connect_to(configured_executable())
+    }
+
+    /// Connect to an explicit executable, applying the same version and platform checks as `connect`.
+    pub fn connect_to(executable: impl Into<OsString>) -> Result<Self, DeskActError> {
+        let executable = executable.into();
         let output = run_agent_desktop(&executable, "version")?;
         let envelope: Envelope<serde_json::Value> = parse_envelope(&output, "version")?;
 
@@ -503,18 +508,28 @@ impl VerifiedNativeCli {
         window: &NativeWindow,
         timeout: Duration,
     ) -> Result<serde_json::Value, DeskActError> {
-        let output = self.invoke_args_with_timeout(
-            &[
-                "snapshot",
-                "--app",
-                &window.app_name,
-                "--window-id",
-                &window.id,
-                "-i",
-            ],
+        self.fresh_snapshot_scoped(window, None, timeout)
+    }
+
+    /// Capture a fresh interactive snapshot, optionally drilled down to a ref inside the window.
+    pub(crate) fn fresh_snapshot_scoped(
+        &self,
+        window: &NativeWindow,
+        root: Option<&str>,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, DeskActError> {
+        let mut args = vec![
             "snapshot",
-            timeout,
-        )?;
+            "--app",
+            &window.app_name,
+            "--window-id",
+            &window.id,
+            "-i",
+        ];
+        if let Some(root) = root {
+            args.extend(["--root", root]);
+        }
+        let output = self.invoke_args_with_timeout(&args, "snapshot", timeout)?;
         let data = successful_data(output, "snapshot")?;
         if data
             .pointer("/window/id")
