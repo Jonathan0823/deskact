@@ -15,8 +15,8 @@ use serde_json::Value;
 use crate::{
     AgentBudget, AgentDesktop, AgentLoopReport, AgentModel, AgentOutcome, AgentStep,
     AppCatalogEntry, CancellationToken, DeskActError, DesktopCall, DesktopObserver, Observation,
-    ObservedDesktop, StepApprover, UserAnswers,
-    run_agent_loop_with_answers, step_policy::escape_text, validate_open_app_request,
+    ObservedDesktop, StepApprover, UserAnswers, run_agent_loop_with_answers,
+    step_policy::escape_text, validate_open_app_request,
 };
 
 /// Which path a request takes.
