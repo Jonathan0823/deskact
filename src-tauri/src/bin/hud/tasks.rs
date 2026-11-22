@@ -62,6 +62,8 @@ pub struct TaskHub {
     next_task_id: AtomicU64,
     next_revision: AtomicU64,
     state: Mutex<HubState>,
+    /// Shared by every task so the mutation lease can conflict across them.
+    coordinator: Arc<TaskCoordinator>,
 }
 
 impl TaskHub {
@@ -193,6 +195,7 @@ pub fn submit_task(
     let task_id = snapshot.task_id;
     let test_fixture = snapshot.test_fixture;
     let cancellation = hub.cancellation_token(task_id).expect("new task token");
+    let coordinator = Arc::clone(&hub.coordinator);
 
     tauri::async_runtime::spawn(async move {
         let prepared = match prepare_task_request(
@@ -245,13 +248,12 @@ pub fn submit_task(
                 cancellation: native_cancellation.clone(),
                 native_started: native_started_worker,
             };
-            // TaskHub already refuses concurrent submissions, so this lease is never contended.
             execute_prepared_task(
                 prepared,
                 Vec::new(),
                 &mut adapter,
                 None,
-                &TaskCoordinator::default(),
+                &coordinator,
                 &native_cancellation,
             )
         })
