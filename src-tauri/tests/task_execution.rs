@@ -73,6 +73,10 @@ impl ChatEndpoint {
                     Err(error) => panic!("accept model request: {error}"),
                 }
             };
+            // Windows accepted sockets inherit the listener's non-blocking mode.
+            stream
+                .set_nonblocking(false)
+                .expect("blocking model fixture stream");
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("bound model fixture read");
