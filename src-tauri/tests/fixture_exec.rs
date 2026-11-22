@@ -1,4 +1,5 @@
 //! Fixture scripts must be executable the moment their writer returns, even under concurrent spawns.
+#![cfg(unix)]
 
 mod common;
 
