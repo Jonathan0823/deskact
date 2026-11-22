@@ -7,8 +7,8 @@
 **GitHub repository (proposed):** `deskact`<br>
 **Repository description:** An open-source AI desktop agent for Windows. Control native apps, browsers, and system tasks with natural language or voice. Built with Rust + Tauri.
 
-**Version:** 1.14 — AI-assisted app selection grounded in the local catalog
-**Date:** 6 November 2026
+**Version:** 1.15 — Observation-driven agent loop for app control
+**Date:** 22 November 2026
 **Status:** Phase 0 closed no-go for broad native automation on the tested setup; Phase 1 authorized only under the reduced native support boundary below. Browser support boundary, LLM contract, app-selection policy, project license, and no-bundled-sidecar distribution are recorded.
 **Initial platform:** Windows 10/11; other desktop platforms are out of MVP scope<br>
 **Product form:** **One user-facing DeskAct application and installer.** Modular Rust orchestrator in the Tauri host process; a development-only terminal harness in Phase 1; Tauri text HUD enabled in Phase 2. Users install automation CLIs separately; DeskAct does not bundle or auto-install them.
@@ -33,7 +33,7 @@ Finding, opening, and controlling apps, files, folders, and common PC functions 
 
 1. Help power users find, open, and control Windows apps, files, folders, and common system functions through natural language.
 2. Execute registered multi-step workflows and unique exact canonical app-name matches without a model when their inputs are fully specified; use the primary LLM to resolve non-exact natural-language app requests against the local catalog and for other unrecognized or dynamic tasks.
-3. Control supported native applications through an accessibility-first observe → act → verify loop; treat broad app compatibility as capability-dependent, not guaranteed.
+3. Control supported native applications through an accessibility-first observation-driven agent loop (observe → act → verify each cycle); treat broad app compatibility as capability-dependent, not guaranteed.
 4. Include best-effort browser automation, with native applications as the reliability baseline.
 5. Recover from stale UI references and bounded transient failures without choosing the wrong target or duplicating actions.
 6. Provide transparent progress, cancellation, verification and meaningful failure explanations through a developer-only terminal harness in Phase 1 and the Tauri HUD from Phase 2.
@@ -80,10 +80,10 @@ flowchart TD
     NORMAL --> ROUTER["Rust Deterministic Intent Router"]
     ROUTER --> MATCH{"Registered workflow or exact canonical app name?"}
     MATCH -->|Yes| KNOWN["Validated Direct Action / Known Workflow"]
-    MATCH -->|No| LLM["Primary LLM: Interpret + Select from App Catalog + Plan"]
+    MATCH -->|No| LLM["Primary LLM: Select from App Catalog / Open-App Plan / Agent Loop"]
     KNOWN --> POLICY["Rust Policy & Approval Gate"]
     LLM --> POLICY
-    POLICY -->|Allowed / approved| LOOP["Rust Agent Execution Loop"]
+    POLICY -->|Allowed / approved| LOOP["Rust Execution Loop (observation-driven for app control)"]
     POLICY -->|Denied / cancelled| OUT["Final Result / User Feedback"]
     LOOP --> DISP["Tool Dispatcher"]
     DISP --> DESK["agent-desktop: Native Apps"]
@@ -107,7 +107,7 @@ flowchart TD
     TTS --> VOICEOUT["Spoken feedback"]
 ```
 
-**Interpretation:** Voice is transcribed to text before routing; the development-only harness bypasses the HUD while testing the same Rust core. **There is no second AI router.** Registered workflows and unique exact canonical app-name matches can use local deterministic paths. For non-exact app language, the *primary* LLM interprets the request against the eligible discovered/configured app catalog and may select a catalog entry or ask for clarification; it cannot invent an app target. Other unmatched requests may also go to the primary LLM. The Rust policy gate controls all action requests. The Rust loop reobserves and verifies each meaningful step; it calls the primary LLM again only when replanning is genuinely necessary. The output is a verified outcome or a transparent partial, failed, or cancelled status.
+**Interpretation:** Voice is transcribed to text before routing; the development-only harness bypasses the HUD while testing the same Rust core. **There is no second AI router.** Registered workflows and unique exact canonical app-name matches can use local deterministic paths. For non-exact app language, the *primary* LLM interprets the request against the eligible discovered/configured app catalog and may select a catalog entry or ask for clarification; it cannot invent an app target. Other unmatched requests may also go to the primary LLM. The Rust policy gate controls all action requests. For tasks beyond opening an app, the **agent loop** runs: the primary LLM sees a bounded snapshot of the single verified **target window**, proposes a few tool calls, and Rust validates, classifies, authorizes and executes each before returning the next observation. Opening an app keeps the up-front JSON action-plan fast path. The output is a verified outcome or a transparent partial, failed, or cancelled status.
 
 ### 4.1 Input-to-execution examples
 
@@ -118,7 +118,7 @@ flowchart TD
 | “Open Downloads” | Known folder alias | Validated OS action → verify location opened |
 | “Open my editor” (multiple plausible catalog entries) | Primary LLM requests clarification using catalog candidates | Show candidates and ask; never choose randomly; optional explicit aliases are convenience only |
 | “Open Notepad and insert this exact text” | Registered workflow if supported, otherwise LLM plan | OS + `agent-desktop` → verify content |
-| “Open VLC and play the sample video” | Main LLM unless a tested workflow is registered | `agent-desktop` observe/act/verify loop; verify playback state where observable |
+| “Open VLC and play the sample video” | Open VLC via action plan, then agent loop (unless a tested workflow is registered) | Agent loop on the VLC target window (best-effort app); verify playback state where observable; otherwise unverified |
 | “Summarize what this document says” | Main LLM | Read approved content → respond; no desktop mutation required |
 | “Delete all files in Downloads” | Policy gate regardless of routing | Explicit approval and constrained scope; never execute arbitrary shell text |
 
@@ -136,7 +136,7 @@ A unique exact canonical app-name match can resolve locally. For non-exact wordi
 ### 5.2 Journey B — native multi-step task
 
 **Instruction:** “Open Notepad, type a short note, and save it to my Desktop.”<br>
-DeskAct builds a minimal plan, opens the app, observes the target window, selects the relevant editor, types, and verifies the text where observable. Before saving, it follows the applicable overwrite approval policy; afterward it verifies both the intended path and expected content (not merely that a file exists). If evidence is unavailable or ambiguous, it reports the precise uncertainty rather than inventing success.
+DeskAct opens the app with a JSON action plan, then runs the agent loop: it observes the target window, proposes tool calls (select the relevant editor, `set_value`/type), and verifies the text where observable. Before saving, it follows the applicable overwrite approval policy (POL-01a: `set_value` over existing text requires per-step approval); afterward it verifies both the intended path and expected content (not merely that a file exists). If evidence is unavailable or ambiguous, it reports the precise uncertainty rather than inventing success.
 
 ### 5.3 Journey C — native application with dynamic UI
 
@@ -161,10 +161,10 @@ flowchart TB
     BUS --> CORE[DeskAct Core - Rust / Tokio]
     CORE --> RT[Intent Router]
     RT -->|Exact canonical app name / registered workflow| PL[Validated Direct Action or Workflow]
-    RT -->|Non-exact app reference / other unhandled request| PLAN["Primary LLM with eligible app-catalog candidates<br/>user-configured local or remote endpoint"]
+    RT -->|Non-exact app reference / other unhandled request| PLAN["Primary LLM: catalog selection, open-app plans, agent-loop tool calls<br/>user-configured local or remote endpoint"]
     PLAN --> POLICY[Policy & Approval Gate]
     PL --> POLICY
-    POLICY --> LOOP["Task Executor<br/>Observe → Act → Verify"]
+    POLICY --> LOOP["Task Executor<br/>Observe → Act → Verify (loop continues from each fresh observation)"]
     LOOP <--> MEM["Ephemeral Task Context<br/>bounded summaries & events"]
     LOOP --> TD["Desktop Adapter<br/>agent-desktop"]
     LOOP --> TB["Browser Adapter<br/>agent-browser / CDP"]
@@ -182,9 +182,9 @@ flowchart TB
 |---|---|
 | In-process Rust core | Task lifecycle, orchestration, step selection, state transitions, deadlines and cancellation inside the Tauri host process |
 | Intent Router | Deterministic registered-workflow and exact canonical-name fast paths; delegates non-exact app selection to the primary LLM with catalog candidates; no separate learned classifier |
-| LLM Connector / Planner | One configurable OpenAI-compatible API endpoint, model and credentials; supports remote providers or a separately managed local model server; never launches local LLM itself |
+| LLM Connector / Planner / Agent Loop | One configurable OpenAI-compatible API endpoint, model and credentials; supports remote providers or a separately managed local model server; never launches local LLM itself. Produces JSON action plans for opening apps and Chat Completions tool calls for the agent loop |
 | Policy Engine | Tool allowlists, risk classification, approval gates and audit decisions |
-| Tool Manager / Dispatcher | Routes typed actions, starts bounded subprocesses on demand, manages deadlines/cancellation, checks exit codes/output, reuses sessions as supported, and cleans up only DeskAct-owned children |
+| Tool Manager / Dispatcher | Routes typed actions and validated agent-loop tool calls, starts bounded subprocesses on demand, manages deadlines/cancellation, checks exit codes/output, reuses sessions as supported, and cleans up only DeskAct-owned children |
 | Desktop Adapter | Structured `agent-desktop` CLI invocation, schema checks, session scoping and UI refs |
 | Browser Adapter | CDP connection, tab identity, browser snapshots and actions (Phase 3) |
 | OS Executor | Explicit executable/argument invocation and constrained file/system operations |
@@ -205,7 +205,7 @@ flowchart TB
 | Web automation | User-installed, optional `agent-browser` CLI; Edge is the initial target, Helium exploratory; attach only to a dedicated user-launched CDP profile |
 | Desktop packaging (Phase 2) | **One Tauri v2 application/installer**; React/Tailwind WebView; automation sidecars are not included |
 | Voice (Phase 2b) | English-only PTT; Groq-first STT/TTS behind adapters, with local alternatives deferred; explicit separate provider opt-ins; raw audio discarded after transcription |
-| LLM integration | Configurable Chat Completions endpoint/model/key; complete JSON action plans validated locally; provider schema enforcement optional; no LLM child process |
+| LLM integration | Configurable Chat Completions endpoint/model/key; complete JSON action plans validated locally for opening apps; Chat Completions tool calling required for agent-loop tasks; provider schema enforcement optional; no LLM child process |
 | Persistence | Explicitly configured app entries persist locally; discovered candidates are refreshed from current system inventory; optional user aliases are explicit convenience data, not required for natural-language resolution; no persistent task memory or automatic learning in MVP |
 
 **Integration rule:** Require the documented baseline tool versions (`agent-desktop` 1.1.0; `agent-browser` 0.41.2 when browser capability is enabled) and JSON contract compatibility. Preflight tool availability/version; unknown fields may be tolerated, but incompatible envelope changes must fail visibly rather than silently misparse.
@@ -265,26 +265,30 @@ max_tokens / temperature / timeout: configurable within validated limits
 
 - Support URL/model/key configuration rather than hard-coded OpenAI vendor names. Apply HTTPS by default for remote connections; explicit loopback HTTP can be allowed for local providers.
 - **Required API surface:** The configured base URL and model must support Chat Completions-style requests and responses. Responses-only endpoints are unsupported in the MVP.
-- **Action-plan contract:** Every action plan must be a complete JSON response accepted by DeskAct's local schema and semantic validation before policy evaluation. Use provider-level JSON Schema/structured-output enforcement when supported; otherwise use JSON mode or prompt-constrained JSON, with the same local validation. Natural-language responses may answer or clarify, but are never interpreted as executable plans.
-- **Optional features:** API tool/function calling, streaming, and `/models` discovery are not required. Rust interprets only the known action-plan format and remains the sole executor/policy authority. Users configure the model ID directly; a model listing is only a convenience and does not certify model capabilities. If plan streaming is used, buffer until the response is complete before validation or execution.
-- **Setup and failure behavior:** Offer an explicit connection test that sends a synthetic, non-sensitive request to the configured endpoint/model; it executes no actions and is only a smoke test. For malformed/schema-invalid plans, permit at most one bounded correction request, then fail closed with a specific actionable error. Never silently execute unstructured text, an incomplete stream, or a partial plan. Do not log credentials or private prompts.
+- **Action-plan contract (opening apps):** Every action plan must be a complete JSON response accepted by DeskAct's local schema and semantic validation before policy evaluation. Use provider-level JSON Schema/structured-output enforcement when supported; otherwise use JSON mode or prompt-constrained JSON, with the same local validation. Natural-language responses may answer or clarify, but are never interpreted as executable plans.
+- **Tool calling for agent-loop tasks:** Tasks beyond opening an app run the agent loop and **require** an endpoint that supports Chat Completions tool/function calling. Endpoints without it can still open apps through JSON action plans; agent-loop tasks report a clear unsupported-endpoint error. The model only proposes tool calls; it never invokes `agent-desktop` and Rust remains the sole executor/policy authority.
+- **Optional features:** Streaming and `/models` discovery are not required, and tool calling is not required for JSON action plans. Rust interprets only the known action-plan format and tool-call schema. Users configure the model ID directly; a model listing is only a convenience and does not certify model capabilities. If plan streaming is used, buffer until the response is complete before validation or execution.
+- **Setup and failure behavior:** Offer an explicit connection test that sends a synthetic, non-sensitive request to the configured endpoint/model; it executes no actions and is only a smoke test; it also reports whether the endpoint supports tool calling. For malformed/schema-invalid plans, permit at most one bounded correction request, then fail closed with a specific actionable error. Never silently execute unstructured text, an incomplete stream, or a partial plan. Do not log credentials or private prompts.
 - Keep secrets in OS-protected storage or an appropriately secured backend credential store. Do not print authorization headers, secrets or private prompts to default logs.
 - For the MVP, DeskAct uses **one active primary endpoint/model** at a time, configurable by the user. No secondary routing model or local model-server management is included.
 
 ## 7. Grounded App Selection and Primary LLM Routing
 
-There is **no Laya, System 1 model, dedicated classifier or second routing LLM in the MVP**. Exact canonical app-name matches and registered workflows may use a deterministic fast path. Non-exact app requests go to the **same primary LLM** used for planning and task-level reasoning, with eligible catalog candidates so the model can interpret the user's wording without inventing a target. Risk decisions and candidate-ID validation always belong to Rust, not the LLM's confidence.
+There is **no Laya, System 1 model, dedicated classifier or second routing LLM in the MVP**. Exact canonical app-name matches and registered workflows may use a deterministic fast path. Non-exact app requests go to the **same primary LLM** used for action plans and the agent loop, with eligible catalog candidates so the model can interpret the user's wording without inventing a target. Risk decisions and candidate-ID validation always belong to Rust, not the LLM's confidence.
 
 ```mermaid
 flowchart TD
     A["Normalized User Request"] --> B{"Exact canonical app name or registered workflow?"}
     B -->|Yes| C["Build Typed Direct Action"]
     B -->|No| F["Primary LLM: Interpret + Select Catalog ID or Clarify"]
-    F --> G{"Requires tools?"}
-    G -->|No| ANS["Produce Answer / Clarification"]
-    G -->|Yes| PLAN["Create Small Structured Task Plan"]
+    F --> G{"Needs?"}
+    G -->|No tools| ANS["Produce Answer / Clarification"]
+    G -->|Open app| PLAN["Structured JSON Action Plan (catalog ID)"]
+    G -->|Control app| AGENT["Agent Loop on Target Window"]
     C --> POLICY["Rust Risk Policy + Approval"]
     PLAN --> POLICY
+    AGENT --> STEP["Per-step Rust Validate / Classify / Authorize"]
+    STEP --> EX
     POLICY -->|Approved / permitted| EX["Shared Agent Execution Loop"]
     POLICY -->|Denied| STOP["Cancelled / Rejected"]
 ```
@@ -293,15 +297,17 @@ flowchart TD
 
 **ROUTE-02 — Catalog-grounded app selection:** For non-exact app wording, provide eligible discovered/configured entries to the primary LLM and require a supplied stable catalog ID or a clarification request. Rust validates every selected ID and its configured target. Never accept model-invented executable paths, raw shell commands, or out-of-catalog identities. When multiple entries plausibly match, present candidates and ask; never choose arbitrarily.
 
-**ROUTE-03 — Unhandled behavior:** If no supported match exists, call the primary LLM. It may return a structured task plan, request clarification, or produce a conversational response with no tools. The absence of a match never grants permission to run raw shell commands.
+**ROUTE-03 — Unhandled behavior:** If no supported match exists, call the primary LLM. It may return a structured open-app plan, start the agent loop for app control, request clarification, or produce a conversational response with no tools. The absence of a match never grants permission to run raw shell commands.
 
-**ROUTE-04 — Dynamic OpenAI-compatible adapter:** Phase 1 uses one provider interface with **user-configurable API base URL, model ID, optional API key, and timeout/parameter settings**. Power-user setup of this endpoint and credentials is acceptable for the first usable release. The configured endpoint must implement the Chat Completions request/response shape; Responses-only endpoints are outside MVP scope. The same adapter connects to remote providers or independently started local model servers. The UI must never receive stored credentials. Every action plan must be complete JSON that passes local schema and semantic validation. Use provider-level structured-output enforcement when available; otherwise use JSON mode or prompt-constrained JSON with the same validation. API tool/function calling, streaming, and model discovery are optional; a configured model ID is sufficient. Offer a user-initiated synthetic connection test that executes no actions and is not a capability guarantee. Permit at most one bounded correction request for a malformed or schema-invalid plan; validate any corrected response from scratch, then fail closed with a specific error if it remains invalid. Never execute natural-language text or partial streamed output as a plan.
+**ROUTE-04 — Dynamic OpenAI-compatible adapter:** Phase 1 uses one provider interface with **user-configurable API base URL, model ID, optional API key, and timeout/parameter settings**. Power-user setup of this endpoint and credentials is acceptable for the first usable release. The configured endpoint must implement the Chat Completions request/response shape; Responses-only endpoints are outside MVP scope. The same adapter connects to remote providers or independently started local model servers. The UI must never receive stored credentials. Every open-app action plan must be complete JSON that passes local schema and semantic validation. Use provider-level structured-output enforcement when available; otherwise use JSON mode or prompt-constrained JSON with the same validation. Streaming and model discovery are optional; a configured model ID is sufficient. JSON plans do not need tool calling, but **agent-loop tasks require Chat Completions tool calling** (see ROUTE-06). Offer a user-initiated synthetic connection test that executes no actions, reports tool-calling support, and is not a capability guarantee. Permit at most one bounded correction request for a malformed or schema-invalid plan; validate any corrected response from scratch, then fail closed with a specific error if it remains invalid. Never execute natural-language text or partial streamed output as a plan.
 
 **ROUTE-05 — Workflow independence:** A validated registered workflow may have multiple steps and still bypass LLM planning. However, each step remains subject to policy, observation and verification.
 
-**ROUTE-06 — Replanning:** The agent loop can ask the **same primary LLM** for the next action only when unforeseen UI observations or task changes require reasoning. Normal verified step transitions require no additional LLM call.
+**ROUTE-06 — Agent loop:** For any task beyond opening an app, DeskAct runs an observation-driven **agent loop** (ADR 0002) instead of replanning only on surprises. The **same primary LLM** sees a bounded snapshot of the single verified **target window**, proposes a few tool calls, and Rust validates, classifies, authorizes and executes each through `agent-desktop`, then returns the next observation. Opening an app keeps the up-front JSON action-plan fast path (exact name or catalog-grounded selection). Operations are app-agnostic accessibility actions usable on any cataloged app; Notepad alone carries the 19/20 reliability gate and other apps are best-effort. The loop requires tool calling (§6.5).
 
-**Routing contract:** Deterministic routing outputs an exact match or delegates to the primary LLM. For app selection, the LLM returns a supplied catalog ID or a clarification request; Rust validates that result and the configured target before any action. LLM plans return typed actions with expected postconditions; all tools are dispatched through Rust policy/execution layers. A plan cannot override policy rules.
+**Agent-loop tool set (fixed, confined to the target window):** `observe` (snapshot, optional drill-down root), `click(ref)`, `set_value(ref, text)`, `press(keys)`, `read_value(ref)`, `finish(summary)`, `ask_user(question)`. There is no launching or closing other apps, clipboard, drag, screenshots, window switching or raw CLI flags. The model never invokes `agent-desktop` or sees its raw CLI. The tool prompt is DeskAct-owned, adapted from the `agent-desktop` v1.1.0 skill text, committed and reviewed, and updated only together with the CLI version pin.
+
+**Routing contract:** Deterministic routing outputs an exact match or delegates to the primary LLM. For app selection, the LLM returns a supplied catalog ID or a clarification request; Rust validates that result and the configured target before any action. LLM plans and agent-loop tool calls return typed actions; all tools are dispatched through Rust policy/execution layers. A plan cannot override policy rules.
 
 **Example action schema (conceptual):** `action_kind`, `target`, `arguments`, `expected_postcondition`, `risk_level`, `timeout_ms`, `idempotency_class`.
 
@@ -311,12 +317,13 @@ flowchart TD
 stateDiagram-v2
     [*] --> Created
     Created --> Routing
-    Routing --> Planning: Complex request
+    Routing --> Planning: Open-app request needing a plan
+    Routing --> Executing: Agent-loop task (no task-level approval)
     Routing --> PolicyCheck: Deterministic request
     Planning --> PolicyCheck
-    PolicyCheck --> AwaitingApproval: High impact
+    PolicyCheck --> AwaitingApproval: Consequential or unclassifiable step
     AwaitingApproval --> Executing: Approved
-    AwaitingApproval --> Cancelled: Rejected
+    AwaitingApproval --> Cancelled: Denied (stopped by user)
     PolicyCheck --> Executing: Permitted
     Executing --> Observing
     Observing --> SelectingAction
@@ -324,8 +331,11 @@ stateDiagram-v2
     Dispatching --> Verifying
     Verifying --> Observing: More steps
     Verifying --> Recovering: Recoverable failure
-    Recovering --> Observing: Safe retry or replan
+    Recovering --> Observing: Safe retry, then continue with fresh observation
     Recovering --> Failed: Budget exhausted / unsafe
+    Observing --> Partial: Loop budget exhausted or finish unverified
+    SelectingAction --> AwaitingApproval: Step flagged consequential
+    SelectingAction --> Completed: finish verified by Rust
     Verifying --> Completed: All postconditions satisfied
     Verifying --> Partial: Some postconditions unverified
     Executing --> Cancelled: Cancel requested
@@ -337,23 +347,30 @@ stateDiagram-v2
     Cancelled --> [*]
 ```
 
-**Lifecycle statuses:** `created`, `routing`, `planning`, `awaiting_approval`, `executing`, `observing`, `verifying`, `recovering`, `completed`, `partial`, `failed`, `cancelled`.
+**Lifecycle statuses:** `created`, `routing`, `planning`, `awaiting_approval`, `executing`, `observing`, `verifying`, `recovering`, `completed`, `partial`, `failed`, `cancelled`, `stopped_by_user` (approval denied in an agent-loop task).
 
 **Verification levels:** (1) command accepted; (2) action delivered; (3) UI postcondition observed; (4) task-level goal verified. Reporting must not conflate these levels. DeskAct-owned verification rules determine completion; an LLM-proposed postcondition or claim is not sufficient evidence by itself. When adequate independent evidence is unavailable, report partial/unverified rather than completed.
+
+**Agent loop (tasks beyond opening an app):** There is no task-level approval; a user request starts the loop immediately. Each cycle: Rust sends the primary model a bounded snapshot of the target window; the model proposes a few tool calls; Rust validates, classifies, authorizes and executes each; the resulting observation is returned. The loop ends on `finish(summary)`, `ask_user(question)` (pause for the user), cancellation, denial or budget exhaustion. A `finish` is a **model-reported outcome** until Rust independently confirms it, making it a **verified outcome** (Notepad: text readback; saved file read from disk); otherwise it is reported as unverified.
+
+- **Per-task budget (tunable after real runs):** at most 25 model turns, 40 executed tool calls and 3 minutes wall clock; each snapshot sent to the model is compact, interactive-only and capped at about 16 KB. On exhaustion, stop safely and report partial/unverified.
+- **Approval and denial:** Only steps Rust classifies as consequential, or cannot classify (see §12), pause for action-specific approval. Denying a flagged step ends the task as "stopped by user"; the model is not told and does not retry alternatives.
+- **Focus:** Prefer accessibility actions. Before each `press`, focus the target window and confirm focus; if focus cannot be confirmed, stop safely without sending keystrokes.
+- **Dev harness first:** The loop is built and proven in the development harness (console approvals and `ask_user` prompts) before the island approval/question UI follows after the gate.
 
 **Limits:** Configurable per-step deadline, app-readiness deadline, whole-task deadline, step count limit and bounded retry budget. The default retry cap is **up to three recovery attempts for safe-to-retry actions only**, never three retries for every error.
 
 ### 8.1 Canonical task-context fields
 
-`task_id`, `user_intent`, `plan_version`, `current_step`, `active_app`, `window_id`, `browser_tab_id`, `observations`, `last_action`, `delivery_disposition`, `verification_evidence`, `retry_budget`, `deadline`, `approval_state`, `status`, `cancellation_token`.
+`task_id`, `user_intent`, `plan_version` (open-app action plans only), `model_turns`, `tool_calls_executed`, `elapsed_ms` (agent-loop budget counters against 25 / 40 / 3 min), `current_step`, `active_app`, `window_id`, `browser_tab_id`, `observations`, `last_action`, `delivery_disposition`, `verification_evidence`, `retry_budget`, `deadline`, `approval_state`, `status`, `cancellation_token`.
 
-This context is ephemeral in Phase 1; long histories and full accessibility trees are not repeatedly injected into the model. Keep only the last relevant view plus compact summaries and a bounded event trail.
+This context is ephemeral in Phase 1; long histories and full accessibility trees are not repeatedly injected into the model. Keep only the last relevant view plus compact summaries and a bounded event trail. Agent-loop state also tracks turn, tool-call and wall-clock budget usage.
 
 ## 9. Desktop Accessibility Adapter Requirements
 
 **DSK-01 — App discovery and launch:** Discover applications from Windows Start Menu shortcuts and registered app entries; allow explicitly configured local entries for apps discovery misses. Resolve a unique exact canonical app name deterministically. For non-exact natural-language app requests, let the primary LLM select only from eligible catalog IDs or request clarification. Rust validates the selected ID and uses only its configured target; never accept model-generated executable paths, launch arguments, or shell commands. If multiple candidates remain plausible or intent is uncertain, present candidates and ask rather than guessing. Poll process/window availability with timeout and backoff; do not assume process creation equals GUI readiness.
 
-**DSK-02 — Window identity:** Record the exact application/window identity. If several windows match, choose by stable evidence or request disambiguation; never act on a randomly selected window.
+**DSK-02 — Window identity and target window:** Record the exact application/window identity. The **target window** is the single accessible, non-minimized window of the selected app that DeskAct has verified, together with dialogs and popups it owns in the same process. Observations and agent-loop tool calls are confined to it; any other window, including another window of the same app, is out of scope. If several windows match, choose by stable evidence or request disambiguation; never act on a randomly selected window.
 
 **DSK-03 — Window restoration:** If minimized and the operation requires an exposed window, restore the targeted window and re-observe. Do not indiscriminately steal focus or move the user’s physical pointer.
 
@@ -381,7 +398,7 @@ flowchart TD
     R -->|Yes / Unknown| OBS[Observe actual post-state]
     OBS --> P{Goal already achieved?}
     P -->|Yes| DONE
-    P -->|No / uncertain| STOP["Stop, replan or ask for user input<br/>No blind retry"]
+    P -->|No / uncertain| STOP["Stop or ask for user input (loop tasks continue only from a fresh observation)<br/>No blind retry"]
     R -->|No: retry safe| CODE{Error category}
     CODE -->|STALE_REF / SNAPSHOT_NOT_FOUND| SNAP[Fresh snapshot and re-identify target]
     CODE -->|AMBIGUOUS_TARGET| DIS[Disambiguate window or UI element]
@@ -452,11 +469,15 @@ stateDiagram-v2
 
 ## 12. Safety, Privacy and Trust
 
-**POL-01:** Classify steps: **read-only**, **reversible local action**, **external/high-impact action**. Require explicit, action-specific approval for consequential actions, including destructive, externally visible, or material system-setting changes; never let an LLM downgrade a step’s risk class. Approval is bound to the displayed action, target, and parameters, and expires if any of them change; replanning requires fresh approval.
+**POL-01:** Classify steps: **read-only**, **reversible local action**, **external/high-impact action**. Require explicit, action-specific approval for consequential actions, including destructive, externally visible, or material system-setting changes; never let an LLM downgrade a step’s risk class. Approval is bound to the displayed action, target, and parameters, and expires if any of them change; for JSON action-plan tasks (opening apps), replanning requires fresh approval. Agent-loop tasks have no task-level approval; each consequential step is approved individually (POL-01a), and a denial ends the task as "stopped by user".
+
+**POL-01a — Per-step consequential classification (agent loop):** There is no task-level approval; a user request starts the loop. Rust classifies each proposed step and pauses for action-specific approval only when it is consequential or cannot be classified. Rust flags a step consequential when: (1) `click` or Enter on an element whose accessible name contains delete, remove, send, submit, replace, overwrite, buy, pay, purchase, install, uninstall, sign out, format or empty, or Yes/OK/Confirm in a confirmation dialog (English-only MVP); (2) the keys Delete, Shift+Delete, Alt+F4 or Ctrl+W; (3) `set_value` that would replace a field that already has text (Rust reads the current value first); (4) a Save As path that already exists on disk (overwriting a different file); (5) anything unclassifiable. Plain saves (Ctrl+S on the edited document, new file to a new path) are not flagged. Denying a flagged step ends the task as "stopped by user"; the model is not told and does not retry alternatives.
 
 **POL-02:** OS execution uses an allowlist or validated executable registry with argument vectors (`tokio::process::Command`). Avoid interpolating LLM output into PowerShell, `cmd /C`, or a generic shell.
 
-**POL-03:** Treat website text, app content and accessibility labels as untrusted data. Instructions found inside documents/webpages cannot override the user request or tool permissions.
+**POL-03:** Treat website text, app content, accessibility labels and agent-loop snapshot content as untrusted data, framed as such to the model; snapshot content never changes policy. Instructions found inside documents/webpages cannot override the user request or tool permissions.
+
+**POL-04a — Data sent to the model:** Only the target window's accessibility snapshot (and, in the agent loop, tool results for that window) is ever sent to the model. This is disclosed once in Settings and in the README, which recommends a local endpoint for sensitive content.
 
 **POL-04:** Redact passwords, tokens, cookies, sensitive fields and unnecessary personal content from logs and model prompts. Discard raw PTT audio after transcription. Cloud STT audio and cloud TTS response text require separate, explicit provider-specific opt-ins; show clear processing indicators and do not retain audio by default.
 
@@ -477,11 +498,12 @@ Every task outcome should include the requested objective, achieved postconditio
 | ID | Requirement | Priority | Phase |
 |---|---|---|---|
 | CORE-01 | Run modular Rust/Tokio orchestrator in-process; validate with development-only terminal harness in Phase 1 | P0 | 1 |
-| CORE-02 | Deterministic exact-name/workflow fast paths plus primary-LLM app selection constrained to the local catalog; no System 1 model | P0 | 1 |
+| CORE-02 | Deterministic exact-name/workflow fast paths plus primary-LLM app selection constrained to the local catalog; no System 1 model; agent loop for control beyond opening an app | P0 | 1 |
 | CORE-03 | Dynamic OpenAI-compatible endpoint/model/secret configuration for one primary LLM; no second classifier | P0 | 1 |
 | CORE-04 | Task steps with explicit postconditions and verification | P0 | 1 |
 | CORE-05 | In-memory bounded task state and cancellation | P0 | 1 |
-| CORE-06 | Risk classification and action-specific approval gate; approvals invalidated when action details change | P0 | 1 |
+| CORE-06 | Per-step risk classification and action-specific approval gate (no task-level approval); approvals invalidated when action details change; denial ends the task | P0 | 1 |
+| CORE-08 | Observation-driven agent loop on the target window with fixed tool set, per-task budget (25 turns / 40 tool calls / 3 min / ~16 KB snapshots), and verified vs model-reported outcomes | P0 | 1 |
 | CORE-07 | Serialize mutating tasks; pause, re-observe and revalidate after possible user/UI interference | P0 | 1 |
 | VER-01 | DeskAct-owned evidence rules determine completion independently of LLM claims | P0 | 1 |
 | DSK-01–08 | Native app discovery/launch, lifecycle, snapshots, scoped refs, parsed errors and verification | P0 | 1 |
@@ -490,7 +512,7 @@ Every task outcome should include the requested objective, achieved postconditio
 | OS-01 | Allowlisted direct system commands with readiness checks | P0 | 1 |
 | PROC-01 | On-demand tool subprocess supervision, session-aware reuse, timeouts and owned-child cleanup | P0 | 1 |
 | DIST-01 | One DeskAct app/installer with no automation sidecars; users install/version-check CLIs separately; capability-specific missing-tool guidance | P0 | 2 |
-| LLM-01 | Secure credentials; Chat Completions baseline; locally validated JSON action plans; explicit synthetic connection test; optional provider schema enforcement, tool calling, streaming, and model discovery | P0 | 1 |
+| LLM-01 | Secure credentials; Chat Completions baseline; locally validated JSON action plans for opening apps; Chat Completions tool calling required for agent-loop tasks; explicit synthetic connection test that reports tool-calling support; optional provider schema enforcement, streaming, and model discovery | P0 | 1 |
 | OBS-01 | Structured event trace and honest outcome reporting | P0 | 1 |
 | HUD-01–08 | Tauri overlay, shortcut, text UX, hands-free PTT, speech output, approvals and streaming status | P1 | 2 |
 | BRW-01–06 | Best-effort Edge CDP attachment, dedicated-profile tab handling, safe navigation, verification and desktop/browser handoff; no native reliability target | P1 | 3 |
@@ -548,13 +570,14 @@ flowchart LR
 
 - Set up a **single Rust application crate** under `src-tauri` with modular `core/`, `tools/`, `llm/` and `commands/`; use a dev-only `examples/` or test harness while the HUD is not yet built.
 - Implement Windows app discovery for Start Menu shortcuts/registered app entries, a deterministic app catalog, explicit custom app entries exposed to the dev harness, and registered workflow matching. Use unique exact canonical names as a fast path; for non-exact app phrasing, let the **single primary LLM** select a catalog ID or request clarification. Do not require or automatically learn aliases; no System 1/Laya integration.
-- Implement one primary LLM connector requiring Chat Completions compatibility, with configurable base URL/model/key, async requests, explicit synthetic connection test, locally validated JSON plans, one bounded correction request, and independent Rust risk policy. Treat provider JSON Schema, tool calling, streaming, and model discovery as optional.
+- Implement one primary LLM connector requiring Chat Completions compatibility, with configurable base URL/model/key, async requests, explicit synthetic connection test (reporting tool-calling support), locally validated JSON plans for opening apps, one bounded correction request, and independent Rust risk policy. Tool calling is required for agent-loop tasks; provider JSON Schema, streaming, and model discovery remain optional.
+- Implement the observation-driven **agent loop** (ADR 0002) in the dev harness first: fixed tool set confined to the target window, DeskAct-owned tool prompt, per-task budget, per-step consequential classification with console approvals and `ask_user` prompts, focus confirmation before `press`, and verified vs model-reported outcomes. Island approval/question UI (#43/#44) follows after the gate.
 - Implement typed tool adapters, on-demand subprocess manager, process timeout/cancellation handling and logical session reuse where supported.
 - Treat `launch` as an activation attempt, not authoritative app identity. After launch, enumerate windows and proceed only when exactly one accessible window matches the selected app; fail closed for missing or ambiguous targets. If the target is minimized, ask the user to restore it manually, then re-enumerate and take a fresh snapshot; do not invoke automated restore in this scope.
 - Implement readiness poller, snapshot observation, scoped refs, verification and safe recovery.
 - Add bounded in-memory task context, event trace and test fixtures for structured tool responses.
 
-**Exit:** The development-only console harness reliably completes controlled Notepad multi-step workflows using the same in-process Rust modules intended for the Tauri host, and reports safe recovery/failures. Meet the 19/20 Notepad target within the reduced scope: accessible, uniquely matched, non-minimized windows (users restore minimized apps manually). Run capability-specific checks for Calculator, File Explorer, and VLC without implying the same reliability threshold. Browser checks remain best-effort and are not the native Phase 1 reliability gate.
+**Exit:** The development-only console harness reliably completes controlled Notepad tasks through the **agent loop** using the same in-process Rust modules intended for the Tauri host, and reports safe recovery/failures. The gate is 5 fixed Notepad tasks x 4 runs = 20 runs on the user's daily model, with model and endpoint recorded in the gate report; target 19/20. A run passes only on **verified outcomes**, with approvals firing exactly where expected and no keystrokes to the wrong window. Scripted acceptance workflows remain adapter regression tests and are not the gate. Meet this within the reduced scope: accessible, uniquely matched, non-minimized windows (users restore minimized apps manually). Run capability-specific checks for Calculator, File Explorer, and VLC without implying the same reliability threshold. Browser checks remain best-effort and are not the native Phase 1 reliability gate.
 
 ### Phase 2a — Text-first Tauri HUD
 
@@ -586,6 +609,8 @@ flowchart LR
 
 ## 17. Phase 1 Acceptance Tests
 
+**Agent-loop gate and adapter regression:** AT-43 to AT-47 are the five fixed gate tasks, run 4 times each (20 runs) on the user's daily model with model and endpoint recorded; only verified outcomes pass. The scripted workflow tests (AT-01 to AT-05 and similar) stay as adapter regression tests.
+
 **Fixture safety:** File and media workflows use synthetic or user-approved fixtures in a unique per-run workspace under the operating-system temporary directory. Do not read, overwrite, or delete unrelated user files; only test-created artifacts may be cleaned up.
 
 | Test | Input / injected condition | Required result |
@@ -603,19 +628,29 @@ flowchart LR
 | AT-11 | Permission denied | Clear actionable error, not repeated tool calls |
 | AT-12 | User cancellation | Further steps stopped; in-flight uncertainty disclosed |
 | AT-13 | Open VLC and play a short deterministic fixture from the run workspace | Verify a playing state and advancing playback position where accessible; otherwise report partial/unverified, not success |
-| AT-14 | Unknown but valid multi-step task | Same primary LLM interprets and produces a bounded structured plan |
+| AT-14 | Unknown but valid multi-step task | Opens the app via JSON action plan, then runs the agent loop (tool calling, per-step approval, 25-turn/40-tool-call/3-minute budgets) |
 | AT-15 | Known registered multi-step workflow | Runs without LLM call, but still performs policy and step verification |
 | AT-16 | Unrecognized command requesting arbitrary shell | Rejected or safely reframed; never passed raw into `cmd.exe`/PowerShell |
 | AT-17 | Local OpenAI-compatible endpoint | Configured URL/model is used successfully without launching a model server |
 | AT-18 | Remote endpoint and invalid credentials | Clear auth/network failure; secrets never appear in frontend/logs |
 | AT-19 | Native tool child times out or exits nonzero | Controlled timeout, error reporting, and no accidental termination of user apps |
 | AT-20 | Two native actions in succession | Sidecar commands invoked on demand and session refs handled safely |
-| AT-21 | Endpoint lacks provider-level JSON Schema enforcement | Use JSON mode or prompt-constrained output and accept only a complete plan that passes the same local validation; never downgrade to executing prose |
+| AT-21 | Endpoint lacks provider-level JSON Schema enforcement | Use JSON mode or prompt-constrained output and accept only a complete open-app action plan that passes the same local validation; never downgrade to executing prose |
+| AT-43 | Agent loop: write text in a new Notepad document | Verified outcome: text readback matches exactly; no approval fires; no keystrokes to another window (gate task 1) |
+| AT-44 | Agent loop: append to existing Notepad text | `set_value` over existing text fires overwrite approval; verified readback after approval (gate task 2) |
+| AT-45 | Agent loop: save to a new path in the run workspace | Plain save is not flagged; saved file read from disk matches (gate task 3) |
+| AT-46 | Agent loop: replace an existing file | Save As to an existing path fires approval, then the confirmation dialog fires its own approval; saved file verified from disk (gate task 4) |
+| AT-47 | Agent loop: read back document contents | `read_value` returns contents that Rust confirms against the document; verified outcome (gate task 5) |
+| AT-48 | Denying a flagged step | Task ends as "stopped by user"; model is not told and tries no alternative |
+| AT-49 | Budget exhaustion (25 turns / 40 tool calls / 3 min) | Stop safely; report partial/unverified |
+| AT-50 | Focus cannot be confirmed before `press` | Stop safely; no keystrokes sent |
+| AT-51 | Endpoint without Chat Completions tool calling | Connection test reports it; agent-loop task is refused with a clear error; opening an app via JSON plan still works |
+| AT-52 | Snapshot content contains instructions | Treated as untrusted data; policy and tool permissions unchanged |
 | AT-22 | Consequential action approval, then change target or parameters | Original approval is invalidated; changed action requires a new scoped approval |
 | AT-23 | Ambiguous target or materially uncertain consequence | Stop for clarification/approval; model confidence alone does not authorize action |
 | AT-24 | Second mutating request during active mutation | Report busy; do not queue or execute it; require resubmission after the active task ends |
 | AT-25 | User changes target UI during execution | Pause, re-observe and revalidate before continuing; ask if safe resumption is unclear |
-| AT-26 | LLM claims a goal is complete without verifier evidence | Do not report completed; return partial/unverified or failed with reason |
+| AT-26 | LLM claims a goal is complete without verifier evidence (`finish` without Rust confirmation) | Report as model-reported outcome (unverified); do not report completed or count toward gates |
 | AT-27 | Phase 3: attach to dedicated Edge profile, pin intended tab, navigate to `https://example.com`, verify title/URL, enter title in Notepad | Repeatably verify both browser and Notepad outcomes; confirm loopback-only listener and no unrelated tab/profile touched; best-effort only |
 | AT-28 | Navigate File Explorer to a unique fixture folder and open its known test file | Verify the folder path and file name from fresh UI evidence; ambiguous targets trigger clarification rather than arbitrary selection |
 | AT-29 | Open a uniquely discoverable Windows app by exact or natural-language name | Exact canonical names may resolve locally; non-exact requests select only from catalog candidates; launch is activation only and requires one eligible fresh window before action |
@@ -624,7 +659,7 @@ flowchart LR
 | AT-32 | `agent-desktop` missing or incompatible | Do not execute native tasks; show the exact install/upgrade instructions and required version |
 | AT-33 | `agent-browser` missing/incompatible during a native task | Native task proceeds normally; browser capability stays unavailable and no automatic install is attempted |
 | AT-34 | User runs the LLM connection test | Send only a synthetic, non-sensitive request to the configured Chat Completions endpoint/model; execute no actions; report connectivity/auth/basic response and that the check is not a capability guarantee |
-| AT-35 | Configured endpoint has no `/models` route or tool-calling support | Explicit model ID and locally validated JSON plan work without either optional feature |
+| AT-35 | Configured endpoint has no `/models` route or tool-calling support | Explicit model ID and locally validated JSON plan work (opening apps) without either; agent-loop tasks require tool calling (AT-51) |
 | AT-36 | First action-plan response is malformed or schema-invalid | Allow at most one correction request; revalidate the full corrected plan and rerun normal policy checks; after a second failure, stop with an actionable error and execute nothing |
 | AT-37 | Chat Completions endpoint streams an incomplete/interrupted plan | Do not execute any partial output; validate and proceed only after a complete response is received |
 | AT-38 | Configured endpoint supports Responses API but not Chat Completions | Report the unsupported endpoint contract; do not silently switch routes or send plan text for execution |
@@ -633,7 +668,7 @@ flowchart LR
 | AT-41 | Helium candidate fails a Windows CDP or mixed-workflow check | Keep Helium exploratory/unsupported; Edge and native functionality remain unaffected |
 | AT-42 | User-requested task needs text from an authenticated dedicated browser profile | Send only minimum relevant page context to the configured LLM, treat it as untrusted, disclose the transfer, and never send cookies/tokens/credentials |
 
-**Phase 1 sign-off:** All safety tests pass; controlled Notepad suite meets the reliability target; capability-specific checks cover Calculator, File Explorer, and VLC; logs show observable step evidence; a tool version mismatch fails visibly. Edge/browser checks are best-effort and reported separately.
+**Phase 1 sign-off:** All safety tests pass; the agent-loop Notepad gate (5 tasks x 4 runs, verified outcomes only) meets 19/20; capability-specific checks cover Calculator, File Explorer, and VLC; logs show observable step evidence; a tool version mismatch fails visibly. Edge/browser checks are best-effort and reported separately.
 
 ### Phase 2a App Settings Acceptance Tests
 
@@ -722,7 +757,7 @@ deskact/
 | User-installed CLI missing, outdated, or absent from PATH | Preflight each capability, report the required version and README install command; no silent install/update |
 | Node/runtime or browser download prerequisites | Document Node >=24 for the browser baseline and separate Chrome for Testing provisioning; never bypass TLS validation |
 | Tool-managed browser daemon persists after CLI exit | Track session ownership, reuse supported daemon, document cleanup without killing unrelated user sessions |
-| User-selected local/remote LLM endpoint incompatible | Explicit synthetic Chat Completions connection test; validate every complete plan locally; optional features are not prerequisites; fail closed with precise errors |
+| User-selected local/remote LLM endpoint incompatible | Explicit synthetic Chat Completions connection test; validate every complete open-app action plan locally; agent-loop tasks require tool calling; optional features are not prerequisites; fail closed with precise errors |
 | Credential disclosure across Tauri IPC | Store secrets on backend side, restrict IPC, redact logs and never emit authorization headers |
 
 ## 20. Open Technical Decisions and Agreed Defaults
@@ -732,11 +767,15 @@ deskact/
 1. **Single product:** One DeskAct desktop application/installer, not multiple user-facing CLI and tool services.
 2. **Rust layout:** Core, tool adapters, process manager and LLM client are logical modules within the Tauri Rust host; Phase 1 uses a developer-only harness.
 3. **Tools:** Do not bundle or auto-install automation tools. Require user-installed `agent-desktop` 1.1.0 for native control; `agent-browser` 0.41.2 is optional for Phase 3 browser control. Check versions before use; capability-specific missing-tool errors include README guidance.
-4. **LLM:** One user-configured endpoint/model, with Chat Completions as the required API surface. Every action plan is complete JSON subject to local schema and semantic validation; provider JSON Schema is preferred but not required. Tool calling, streaming and model discovery are optional; model ID is entered directly. Offer a synthetic connection test, allow one bounded correction attempt, then fail closed. No model subprocess or System 1 classifier.
+4. **LLM:** One user-configured endpoint/model, with Chat Completions as the required API surface. Every open-app action plan is complete JSON subject to local schema and semantic validation; provider JSON Schema is preferred but not required. Tool calling is optional for JSON plans (opening apps) but required for agent-loop tasks (v1.15); streaming and model discovery are optional; model ID is entered directly. Offer a synthetic connection test, allow one bounded correction attempt, then fail closed. No model subprocess or System 1 classifier.
 5. **Process lifecycle:** Avoid persistent dedicated workers initially; supervise on-demand invocations, preserve supported tool session state and clean up only DeskAct-owned subprocesses.
 6. **Browser boundary:** Phase 3 uses a user-launched dedicated Edge CDP profile with verified loopback and policy; never attach to the everyday profile or import/export saved auth. Helium is exploratory until it passes equivalent Windows checks. Browser failure never blocks native use.
 
+**Agreed for v1.15 (agent loop design, ADR 0002):** agent loop for control beyond opening an app; fixed tool set confined to the target window; per-task budget of 25 model turns, 40 executed tool calls, 3 minutes and ~16 KB snapshots (numbers tunable after real runs); no task-level approval; per-step consequential classification (POL-01a); denial ends the task; English-only classification for MVP; dev harness first.
+
 **Still requires empirical validation:**
+
+- Agent-loop budget numbers, the 16 KB snapshot cap, and the consequential-name list against real runs of the Notepad gate on the user's daily model.
 
 - Validate user-installed CLI discovery/version preflight on supported Windows. Current documentation baselines are `agent-desktop` 1.1.0 and optional `agent-browser` 0.41.2; do not bundle or auto-install either.
 - Exact repeatable workflows and evidence signals for File Explorer and VLC, in addition to the Notepad reliability suite.
@@ -748,6 +787,17 @@ deskact/
 These investigations do not require introducing a new AI router or additional production services.
 
 ## 21. Change Control
+
+### 21.14 v1.15 vs v1.14 — Observation-driven agent loop
+
+See [ADR 0002](adr/0002-observation-driven-agent-loop.md).
+
+- **Agent loop replaces replan-on-surprise (ROUTE-06):** Tasks beyond opening an app run an observation-driven loop: the primary model sees a bounded snapshot of the single verified target window and proposes tool calls from a fixed set (`observe`, `click`, `set_value`, `press`, `read_value`, `finish`, `ask_user`); Rust validates, classifies, authorizes and executes each. Opening an app keeps the JSON action-plan fast path. The model never invokes `agent-desktop`.
+- **Tool calling:** Agent-loop tasks require Chat Completions tool calling (previously optional); endpoints without it can still open apps. The connection test reports support.
+- **Budget:** 25 model turns, 40 executed tool calls, 3 minutes, ~16 KB per snapshot; exhaustion stops safely as partial/unverified.
+- **Approval:** No task-level approval. Only consequential or unclassifiable steps pause for approval (POL-01a); denial ends the task as "stopped by user".
+- **Outcomes and gate:** Only verified outcomes count. The 19/20 gate is measured on the agent loop with 5 fixed Notepad tasks x 4 runs; scripted workflows stay as adapter regression tests. Built in the dev harness first; island approval UI follows.
+- **Privacy and scope:** Only the target window (including owned dialogs/popups) is sent to the model, disclosed in Settings and README; snapshot content is untrusted. Operations are app-agnostic; only Notepad has the reliability gate.
 
 ### 21.1 v1.12 vs v1.11 — Phase 3 browser support boundary
 

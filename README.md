@@ -1,6 +1,6 @@
 # DeskAct
 
-DeskAct is a Windows-first, accessibility-first desktop assistant for finding, opening, and controlling supported apps. The product is in the specification and Windows validation stage; the DeskAct application is not yet released. The Adaptive Island Windows host is an early prototype: native focus, click-through, DPI, and monitor behavior still require live Windows validation. See the [Product Requirements Document](docs/DeskAct_PRD_v1.14.md), [Glossary](GLOSSARY.md), and [Adaptive Island UI/UX spec](design/ui/DeskAct_Adaptive_Island_UI_Spec_v0.1.md).
+DeskAct is a Windows-first, accessibility-first desktop assistant for finding, opening, and controlling supported apps. The product is in the specification and Windows validation stage; the DeskAct application is not yet released. The Adaptive Island Windows host is an early prototype: native focus, click-through, DPI, and monitor behavior still require live Windows validation. See the [Product Requirements Document](docs/DeskAct_PRD_v1.15.md), [Glossary](GLOSSARY.md), and [Adaptive Island UI/UX spec](design/ui/DeskAct_Adaptive_Island_UI_Spec_v0.1.md).
 
 ## Adaptive Island app prototype
 
@@ -59,6 +59,12 @@ This download is separate from npm installation. Planned Phase 3 browser support
 - If PowerShell cannot find a CLI after installation, open a new terminal and check that the npm global bin directory is on `PATH`.
 - The browser package declares Node.js `>=24`. Check with `node --version` if installation or execution reports an engine mismatch.
 - A TLS `UnknownIssuer` error while downloading Chrome for Testing indicates the machine does not trust the certificate chain. Do not disable TLS verification; resolve the trust configuration with your IT administrator, or use an authorized existing Edge/CDP setup.
+
+## What DeskAct sends to your model
+
+To control an app, DeskAct sends your configured model only the accessibility snapshot of the single target window (including dialogs it owns), never other windows or screenshots. Snapshot content is treated as untrusted data. For sensitive content, use a local OpenAI-compatible endpoint.
+
+Tasks beyond opening an app run an agent loop and need a Chat Completions endpoint that supports tool calling. Endpoints without tool calling can still open apps through JSON action plans. The connection test reports tool-calling support.
 
 ## Phase 1 developer harness
 
