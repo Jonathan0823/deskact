@@ -391,3 +391,31 @@ fn preflight_reports_actionable_guidance_when_the_cli_is_missing() {
     assert!(stderr.contains("DESKACT_AGENT_DESKTOP"), "{stderr}");
     assert!(stderr.contains("agent-desktop-win32-x64.exe"), "{stderr}");
 }
+
+#[test]
+fn task_execute_routes_non_open_requests_to_the_agent_loop_and_needs_an_app() {
+    let fake = FakeAgentDesktop::new(
+        r#"{"version":"2.6","ok":true,"command":"version","data":{"version":"1.1.0"}}"#,
+        r#"{"version":"2.6","ok":true,"command":"list-apps","data":[]}"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_deskact-dev"))
+        .args([
+            "task",
+            "execute",
+            "--request",
+            "write",
+            "hello",
+            "in",
+            "the",
+            "document",
+        ])
+        .env("DESKACT_AGENT_DESKTOP", fake.path())
+        .env("DESKACT_POWERSHELL", &fake.powershell)
+        .env("DESKACT_TEST_INVOCATIONS", fake.invocation_log())
+        .output()
+        .expect("run developer harness");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
+    assert!(stderr.contains("--app <name>"), "stderr: {stderr}");
+}

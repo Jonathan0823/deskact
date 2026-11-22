@@ -8,10 +8,12 @@ use std::{
 };
 
 use deskact_core::{
-    CancellationToken, ChatCompletionsPlanner, DeskActError, DiscoveredApp, ManualRestorePrompt,
-    NativeActionAdapter, NativeTargetResolution, NativeWindow, TaskCoordinator, VerifiedNativeCli,
-    add_user_app_entry, edit_user_app_entry, load_app_catalog, native_inventory, preflight,
-    prepare_app_selection, request_action_plan, request_agent_turn, resolve_native_target,
+    AgentBudget, CancellationToken, ChatCompletionsAgentModel, ChatCompletionsPlanner,
+    ConsolePrompts, DeskActError, DiscoveredApp, Expectation, ManualRestorePrompt,
+    NativeActionAdapter, NativeTargetResolution, NativeWindow, ReportingDesktop, TargetWindowTools,
+    TaskCoordinator, TaskRoute, VerifiedNativeCli, add_user_app_entry, edit_user_app_entry,
+    load_app_catalog, native_inventory, preflight, prepare_app_selection, request_action_plan,
+    request_agent_turn, resolve_native_target, route_request, run_agent_task,
     run_calculator_acceptance, run_file_explorer_acceptance, run_notepad_acceptance, run_task,
     run_vlc_acceptance, simulate_approval_scenario, simulate_task_scenario, test_llm_connection,
     validate_action_plan_json,
@@ -278,7 +280,21 @@ fn run_task_command(arguments: &[String]) -> ExitCode {
     }
 
     if arguments.len() >= 3 && arguments[0] == "execute" && arguments[1] == "--request" {
-        let request = arguments[2..].join(" ");
+        let options = match parse_execute_options(&arguments[2..]) {
+            Ok(options) => options,
+            Err(message) => {
+                eprintln!("{message}");
+                return ExitCode::from(2);
+            }
+        };
+        let request = options.request.clone();
+        let route = match load_app_catalog() {
+            Ok(catalog) => route_request(&request, &catalog),
+            Err(error) => return fail(format!("Task execution failed: {error}")),
+        };
+        if route == TaskRoute::AgentLoop {
+            return run_agent_task_command(&options);
+        }
         return match run_task_async(run_task(
             &request,
             load_app_catalog,
@@ -304,9 +320,120 @@ fn run_task_command(arguments: &[String]) -> ExitCode {
     }
 
     eprintln!(
-        "Usage: deskact-dev task <simulate --scenario <name>|approval-simulate --scenario <name>|execute --request <request>"
+        "Usage: deskact-dev task <simulate --scenario <name>|approval-simulate --scenario <name>|execute --request <request> [--app <name>] [--expect-text <text>] [--expect-file <path> <contents>]>"
     );
     ExitCode::from(2)
+}
+
+/// Parsed `task execute` arguments: the request words plus agent-loop options.
+struct ExecuteOptions {
+    request: String,
+    app: Option<String>,
+    expectations: Vec<Expectation>,
+}
+
+/// Split request words from `--app`, `--expect-text` and `--expect-file` options.
+fn parse_execute_options(arguments: &[String]) -> Result<ExecuteOptions, String> {
+    let mut words = Vec::new();
+    let mut app = None;
+    let mut expectations = Vec::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--app" => {
+                let value = arguments.get(index + 1).ok_or("--app requires a value")?;
+                app = Some(value.clone());
+                index += 2;
+            }
+            "--expect-text" => {
+                let value = arguments
+                    .get(index + 1)
+                    .ok_or("--expect-text requires a value")?;
+                expectations.push(Expectation::EditorText(value.clone()));
+                index += 2;
+            }
+            "--expect-file" => {
+                let (Some(path), Some(contents)) =
+                    (arguments.get(index + 1), arguments.get(index + 2))
+                else {
+                    return Err("--expect-file requires a path and the expected contents".into());
+                };
+                expectations.push(Expectation::SavedFile {
+                    path: path.into(),
+                    contents: contents.clone(),
+                });
+                index += 3;
+            }
+            word => {
+                words.push(word.to_owned());
+                index += 1;
+            }
+        }
+    }
+    Ok(ExecuteOptions {
+        request: words.join(" "),
+        app,
+        expectations,
+    })
+}
+
+/// Run one agent-loop task against `--app`, prompting on stderr/stdin and reporting on stdout.
+fn run_agent_task_command(options: &ExecuteOptions) -> ExitCode {
+    let Some(app) = options.app.as_deref() else {
+        eprintln!(
+            "This request is not a plain `open <app>` request, so it runs the agent loop, which needs a target app: add --app <name>."
+        );
+        return ExitCode::from(2);
+    };
+    let target = match resolve_for_agent(app) {
+        Ok(target) => target,
+        Err(error) => return fail(error.to_string()),
+    };
+    let cli = match VerifiedNativeCli::connect() {
+        Ok(cli) => cli,
+        Err(error) => return fail(error.to_string()),
+    };
+    let mut desktop =
+        ReportingDesktop::new(TargetWindowTools::new(cli, target.window), io::stderr());
+    let mut prompts = ConsolePrompts::new(io::stdin().lock(), io::stderr());
+    let result = run_task_async(run_agent_task(
+        &options.request,
+        &mut ChatCompletionsAgentModel,
+        &mut desktop,
+        &mut prompts,
+        &CancellationToken::default(),
+        AgentBudget::default(),
+        &options.expectations,
+    ));
+    match result {
+        Ok(report) => {
+            println!("{}", report.render());
+            if report.is_verified() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(error) => fail(format!("Agent task failed: {error}")),
+    }
+}
+
+/// Resolve the target window, pausing for manual restore when the window is minimized.
+fn resolve_for_agent(app: &str) -> Result<deskact_core::ResolvedNativeTarget, DeskActError> {
+    let mut resolution = resolve_native_target(app)?;
+    loop {
+        match resolution {
+            NativeTargetResolution::Ready(target) => return Ok(target),
+            NativeTargetResolution::NeedsManualRestore { app, window } => {
+                if !StdinRestorePrompt.confirm_restored(&app, &window)? {
+                    return Err(DeskActError::new(
+                        "Resolution cancelled; no window was selected".into(),
+                    ));
+                }
+                resolution = VerifiedNativeCli::connect()?.resume_after_manual_restore(app)?;
+            }
+        }
+    }
 }
 
 /// Manual-restore prompt that asks on stderr and reads the answer from stdin, keeping stdout JSON-only.
