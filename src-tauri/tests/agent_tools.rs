@@ -172,25 +172,79 @@ fn click_set_value_and_read_value_use_observed_refs() {
     tools.observe(None).expect("observe");
 
     tools.set_value("@e1", "new text").expect("set");
+    tools.observe(None).expect("observe after set_value");
     tools.click("@e4").expect("dialog button");
+    tools.observe(None).expect("observe after click");
     let value = tools.read_value("@e1").expect("read");
 
     assert_eq!(value, "hello");
-    assert_eq!(
-        &fixture.calls()[1..],
-        [
-            "set-value @e1 new text",
-            "click @e4",
-            "get @e1 --property value"
-        ]
+    let calls = fixture.calls();
+    assert_eq!(calls[1], "set-value @e1 new text");
+    assert_eq!(calls[3], "click @e4");
+    assert_eq!(calls[5], "get @e1 --property value");
+}
+
+/// A mutating action may change the window, so its refs are stale until the model observes again.
+#[test]
+fn refs_are_stale_after_every_mutating_action_until_observed_again() {
+    let fixture = Fixture::new();
+    fixture.scenario("value.json", r#""hello""#);
+    let mut tools = fixture.tools();
+    for mutate in [
+        |tools: &mut TargetWindowTools| tools.click("@e2").map(|_| ()),
+        |tools: &mut TargetWindowTools| tools.set_value("@e1", "x"),
+        |tools: &mut TargetWindowTools| tools.press("ctrl+s"),
+    ] {
+        tools.observe(None).expect("observe");
+        mutate(&mut tools).expect("mutate");
+        assert!(tools.click("@e2").is_err(), "click on a stale ref");
+        assert!(
+            tools.set_value("@e1", "y").is_err(),
+            "set_value on a stale ref"
+        );
+        assert!(
+            tools.read_value("@e1").is_err(),
+            "read_value on a stale ref"
+        );
+        assert!(
+            tools.observe(Some("@e1")).is_err(),
+            "drill-down from a stale ref"
+        );
+    }
+}
+
+/// Protected fields never expose their value to the model, in observations or by read_value.
+#[test]
+fn password_values_are_masked_for_the_model() {
+    let fixture = Fixture::new();
+    fixture.scenario("value.json", r#""hunter2""#);
+    fixture.scenario(
+        "snapshot.json",
+        r#"{"window":{"id":"fixture-window"},"complete":true,"ref_count":3,"snapshot_id":"s","tree":{"role":"window","children":[
+          {"role":"password","name":"Password","ref_id":"@e1","value":"hunter2"},
+          {"role":"textfield","name":"PIN","ref_id":"@e2","value":"4321","states":["protected"]},
+          {"role":"textfield","name":"Name","ref_id":"@e3","value":"visible-name"}]}}"#,
     );
+    let mut tools = fixture.tools();
+
+    let observation = tools.observe(None).expect("observe");
+
+    assert!(
+        !observation.text.contains("hunter2"),
+        "{}",
+        observation.text
+    );
+    assert!(!observation.text.contains("4321"), "{}", observation.text);
+    assert!(observation.text.contains("visible-name"));
+    assert_eq!(tools.read_value("@e1").expect("read"), "[hidden]");
+    assert_eq!(tools.read_value("@e2").expect("read"), "[hidden]");
 }
 
 /// Keys are sent only after focus on the target window is confirmed.
 #[test]
 fn press_focuses_and_confirms_before_sending_keys() {
     let fixture = Fixture::new();
-    let tools = fixture.tools();
+    let mut tools = fixture.tools();
 
     tools.press("ctrl+s").expect("press");
 
@@ -208,7 +262,7 @@ fn press_focuses_and_confirms_before_sending_keys() {
 fn press_sends_nothing_when_focus_is_not_confirmed() {
     let fixture = Fixture::new();
     fixture.scenario("focused.json", "false");
-    let tools = fixture.tools();
+    let mut tools = fixture.tools();
 
     let error = tools.press("ctrl+s").expect_err("focus unconfirmed");
 
@@ -225,7 +279,7 @@ fn press_sends_nothing_when_focus_is_not_confirmed() {
 #[test]
 fn press_rejects_malformed_keys() {
     let fixture = Fixture::new();
-    let tools = fixture.tools();
+    let mut tools = fixture.tools();
 
     assert!(tools.press("").is_err());
     assert!(tools.press("--help").is_err());

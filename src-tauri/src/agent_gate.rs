@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 
 use crate::{
     AgentBudget, AgentDesktop, AgentLoopReport, AgentModel, AgentOutcome, AgentStep,
-    CancellationToken, DeskActError, Expectation, Observation, StepApprover, UserAnswers,
-    Verification, agent_run::describe_step, run_agent_task,
+    CancellationToken, DeskActError, DesktopCall, DesktopObserver, Expectation, ObservedDesktop,
+    StepApprover, UserAnswers, Verification, agent_run::describe_step, run_agent_task,
 };
 
 /// Runs per task in the full gate (5 tasks x 4 runs = 20).
@@ -304,33 +304,28 @@ impl GateReport {
 }
 
 /// Counts what the model's tools did without changing it.
-struct RecordingDesktop<'a, D> {
-    inner: &'a mut D,
+#[derive(Default)]
+struct ToolRecorder {
     reads: Vec<String>,
     set_values: u32,
     keystrokes: u32,
 }
 
-impl<D: AgentDesktop> AgentDesktop for RecordingDesktop<'_, D> {
-    fn observe(&mut self, root: Option<&str>) -> Result<Observation, DeskActError> {
-        self.inner.observe(root)
+impl DesktopObserver for ToolRecorder {
+    fn before(&mut self, call: DesktopCall<'_>) {
+        if matches!(call, DesktopCall::SetValue(..)) {
+            self.set_values += 1;
+        }
     }
-    fn click(&mut self, element: &str) -> Result<(), DeskActError> {
-        self.inner.click(element)
-    }
-    fn set_value(&mut self, element: &str, text: &str) -> Result<(), DeskActError> {
-        self.set_values += 1;
-        self.inner.set_value(element, text)
-    }
-    fn read_value(&mut self, element: &str) -> Result<String, DeskActError> {
-        let value = self.inner.read_value(element)?;
-        self.reads.push(value.clone());
-        Ok(value)
-    }
-    fn press(&mut self, keys: &str) -> Result<(), DeskActError> {
-        self.inner.press(keys)?;
-        self.keystrokes += 1;
-        Ok(())
+    fn after(&mut self, call: DesktopCall<'_>, succeeded: bool, value: Option<&str>) {
+        if !succeeded {
+            return;
+        }
+        match call {
+            DesktopCall::ReadValue(_) => self.reads.extend(value.map(str::to_owned)),
+            DesktopCall::Press(_) => self.keystrokes += 1,
+            _ => {}
+        }
     }
 }
 
@@ -413,6 +408,7 @@ fn outcome_name(outcome: &AgentOutcome) -> String {
         AgentOutcome::AskedUser { .. } => "AskedUser".into(),
         AgentOutcome::StoppedByUser => "StoppedByUser".into(),
         AgentOutcome::Cancelled => "Cancelled".into(),
+        AgentOutcome::ModelError(_) => "ModelError".into(),
         AgentOutcome::BudgetExhausted(limit) => format!("BudgetExhausted({limit:?})"),
     }
 }
@@ -446,12 +442,7 @@ async fn run_one<E: GateEnvironment>(
         Ok(desktop) => desktop,
         Err(error) => return setup_failure(task, run, error.to_string()),
     };
-    let mut recorder = RecordingDesktop {
-        inner: &mut desktop,
-        reads: Vec::new(),
-        set_values: 0,
-        keystrokes: 0,
-    };
+    let mut recorder = ObservedDesktop::wrap(&mut desktop, ToolRecorder::default());
     let mut recording_user = RecordingUser {
         inner: user,
         approvals: Vec::new(),
@@ -466,8 +457,11 @@ async fn run_one<E: GateEnvironment>(
         &task.expectations,
     )
     .await;
-    let (reads, set_values, keystrokes) =
-        (recorder.reads, recorder.set_values, recorder.keystrokes);
+    let ToolRecorder {
+        reads,
+        set_values,
+        keystrokes,
+    } = recorder.observer;
     let approvals = recording_user.approvals;
     let wrong_window = environment.wrong_window_keystrokes(task, run);
 
