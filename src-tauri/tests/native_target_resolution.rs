@@ -1,9 +1,10 @@
 #![cfg(unix)]
 
+mod common;
+
 use std::{
     fs,
     io::Write,
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::{Command, Output, Stdio},
     time::{SystemTime, UNIX_EPOCH},
@@ -35,7 +36,7 @@ impl Fixture {
         fs::create_dir_all(&dir).expect("create fixture directory");
         let calls = dir.join("calls.log");
         let cli = dir.join("agent-desktop");
-        fs::write(
+        common::write_executable(
             &cli,
             r##"#!/bin/sh
 printf '%s\n' "$*" >> "$DESKACT_TEST_CALLS"
@@ -47,16 +48,10 @@ case "$1" in
   *) echo "unexpected command: $1" >&2; exit 2 ;;
 esac
 "##,
-        )
-        .expect("write fake CLI");
-        let mut permissions = fs::metadata(&cli)
-            .expect("read fake CLI metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&cli, permissions).expect("make fake CLI executable");
+        );
 
         let powershell = dir.join("powershell");
-        fs::write(
+        common::write_executable(
             &powershell,
             r#"#!/bin/sh
 case "$*" in
@@ -64,13 +59,7 @@ case "$*" in
   *) printf '%s\n' "$DESKACT_TEST_CATALOG" ;;
 esac
 "#,
-        )
-        .expect("write fixture PowerShell");
-        let mut permissions = fs::metadata(&powershell)
-            .expect("read fixture PowerShell metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&powershell, permissions).expect("make fixture PowerShell executable");
+        );
 
         Self {
             dir,

@@ -1,8 +1,9 @@
 #![cfg(unix)]
 
+mod common;
+
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output},
     time::{SystemTime, UNIX_EPOCH},
@@ -34,32 +35,19 @@ impl FakeAgentDesktop {
         fs::create_dir_all(&dir).expect("create temporary test directory");
         let executable = dir.join("agent-desktop");
         let invocation_log = dir.join("invocations.log");
-        fs::write(
+        common::write_executable(
             &executable,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$DESKACT_TEST_INVOCATIONS\"\ncase \"$1\" in\n  version) printf '%s\\n' '{}' ;;\n  list-apps) printf '%s\\n' '{}'; exit \"${{DESKACT_TEST_APPS_EXIT_CODE:-0}}\" ;;\n  *) echo unexpected command >&2; exit 2 ;;\nesac\n",
-                version_response,
-                apps_response
+                version_response, apps_response
             ),
-        )
-        .expect("write fake CLI");
-        let mut permissions = fs::metadata(&executable)
-            .expect("read fake CLI metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&executable, permissions).expect("make fake CLI executable");
+        );
 
         let powershell = dir.join("powershell");
-        fs::write(
+        common::write_executable(
             &powershell,
             format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", catalog_response),
-        )
-        .expect("write fake PowerShell");
-        let mut permissions = fs::metadata(&powershell)
-            .expect("read fake PowerShell metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&powershell, permissions).expect("make fake PowerShell executable");
+        );
 
         Self {
             dir,
