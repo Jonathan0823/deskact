@@ -423,3 +423,124 @@ fn llm_validate_plan_accepts_a_complete_versioned_plan() {
         "{stdout}"
     );
 }
+
+fn tool_call_body(name: &str, arguments: &str) -> String {
+    serde_json::json!({"choices":[{"finish_reason":"tool_calls","message":{"content":null,"tool_calls":[
+        {"id":"call_1","type":"function","function":{"name":name,"arguments":arguments}}]}}]})
+    .to_string()
+}
+
+fn run_with_endpoint(endpoint: &LoopbackEndpoint, args: &[&str]) -> (Output, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_deskact-dev"))
+        .args(args)
+        .env("DESKACT_LLM_BASE_URL", &endpoint.base_url)
+        .env("DESKACT_LLM_MODEL", "fixture-model")
+        .env("DESKACT_LLM_API_KEY", "fixture-secret-never-print")
+        .output()
+        .expect("run developer harness");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output, text)
+}
+
+#[test]
+fn llm_test_reports_tool_calling_support_without_executing_anything() {
+    let plain = r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_owned();
+    let endpoint = LoopbackEndpoint::respond_many(vec![
+        (200, "OK".into(), plain),
+        (
+            200,
+            "OK".into(),
+            tool_call_body("finish", r#"{"summary":"done"}"#),
+        ),
+    ]);
+    let (output, text) = run_with_endpoint(&endpoint, &["llm", "test"]);
+    let requests = endpoint.requests.join().expect("fixture requests");
+
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("tool calling supported"), "{text}");
+    assert!(requests[1].contains("\"tools\""), "{}", requests[1]);
+    assert!(!text.contains("fixture-secret-never-print"), "{text}");
+}
+
+#[test]
+fn llm_test_reports_missing_tool_calling_and_plans_still_work() {
+    let plain = r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_owned();
+    let endpoint = LoopbackEndpoint::respond_many(vec![
+        (200, "OK".into(), plain.clone()),
+        (
+            400,
+            "Bad Request".into(),
+            r#"{"error":"tools unsupported"}"#.into(),
+        ),
+    ]);
+    let (output, text) = run_with_endpoint(&endpoint, &["llm", "test"]);
+    endpoint.requests.join().expect("fixture requests");
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("tool calling not detected"), "{text}");
+
+    // AT-51: the JSON action-plan path never sends tools.
+    let plan = r#"{"version":1,"summary":"Open it","steps":[{"operation":"open_app","parameters":{"app_id":"x"},"expected_outcome":"X is open"}]}"#;
+    let body = serde_json::json!({"choices":[{"message":{"content":plan}}]}).to_string();
+    let endpoint = LoopbackEndpoint::respond(200, "OK", &body);
+    let (output, text) = run_with_endpoint(&endpoint, &["llm", "plan", "open x"]);
+    let requests = endpoint.requests.join().expect("fixture requests");
+    assert!(output.status.success(), "{text}");
+    assert!(!requests[0].contains("\"tools\""), "{}", requests[0]);
+}
+
+#[test]
+fn llm_tool_turn_returns_typed_proposals() {
+    let body = tool_call_body("set_value", r#"{"ref":"@e3","text":"hello"}"#);
+    let endpoint = LoopbackEndpoint::respond(200, "OK", &body);
+    let (output, text) = run_with_endpoint(&endpoint, &["llm", "tool-turn", "type hello"]);
+    let requests = endpoint.requests.join().expect("fixture requests");
+
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("SetValue"), "{text}");
+    assert!(text.contains("@e3"), "{text}");
+    for tool in [
+        "observe",
+        "click",
+        "set_value",
+        "press",
+        "read_value",
+        "finish",
+        "ask_user",
+    ] {
+        assert!(
+            requests[0].contains(&format!("\"name\":\"{tool}\"")),
+            "{tool}"
+        );
+    }
+}
+
+#[test]
+fn llm_tool_turn_fails_closed_on_malformed_calls_and_missing_support() {
+    for (name, arguments) in [
+        ("click", "not json"),
+        ("click", r#"{"ref":"@e1","extra":1}"#),
+        ("click", r#"{"ref":""}"#),
+        ("launch_app", r#"{"app":"calc"}"#),
+        ("set_value", r#"{"ref":"@e1"}"#),
+        ("finish", r#"{"summary":"fixture-secret-never-print"}"#),
+    ] {
+        let endpoint = LoopbackEndpoint::respond(200, "OK", &tool_call_body(name, arguments));
+        let (output, text) = run_with_endpoint(&endpoint, &["llm", "tool-turn", "go"]);
+        endpoint.requests.join().expect("fixture requests");
+        assert!(!output.status.success(), "{name} {arguments}: {text}");
+        assert!(!text.contains("fixture-secret-never-print"), "{text}");
+    }
+
+    let endpoint = LoopbackEndpoint::respond(400, "Bad Request", "{}");
+    let (output, text) = run_with_endpoint(&endpoint, &["llm", "tool-turn", "go"]);
+    endpoint.requests.join().expect("fixture requests");
+    assert!(!output.status.success());
+    assert!(
+        text.contains("supports Chat Completions tool calling"),
+        "{text}"
+    );
+}
