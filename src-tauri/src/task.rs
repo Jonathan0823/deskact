@@ -3,9 +3,113 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use std::future::Future;
+
 use serde::Serialize;
 
-use crate::DeskActError;
+use crate::{
+    ActionAdapter, ActionPlan, AppCatalogEntry, DeskActError, DiscoveredApp, NativeWindow,
+    PreparedTask, TaskExecutionReport, execute_prepared_task, model_candidate_context,
+    registered_open_workflow, request_action_plan_with_context, validate_open_app_request,
+};
+
+/// Port through which the primary model proposes an action plan for an unmatched request.
+pub trait ActionPlanner {
+    /// Propose an action plan grounded in the model-safe catalog candidate context.
+    fn plan(
+        &self,
+        request: &str,
+        candidate_context: &str,
+    ) -> impl Future<Output = Result<ActionPlan, DeskActError>> + Send;
+}
+
+/// Planner backed by the configured primary model's Chat Completions interface.
+pub struct ChatCompletionsPlanner;
+
+impl ActionPlanner for ChatCompletionsPlanner {
+    async fn plan(
+        &self,
+        request: &str,
+        candidate_context: &str,
+    ) -> Result<ActionPlan, DeskActError> {
+        request_action_plan_with_context(request, Some(candidate_context)).await
+    }
+}
+
+/// Port that asks the user to restore a minimized window manually before resolution resumes.
+pub trait ManualRestorePrompt {
+    /// Return `Ok(true)` once the user reports the window restored, or `Ok(false)` if they cancel.
+    fn confirm_restored(
+        &mut self,
+        app: &DiscoveredApp,
+        window: &NativeWindow,
+    ) -> Result<bool, DeskActError>;
+}
+
+/// Validate a request, route it through a registered workflow or the primary model, and dispatch it.
+///
+/// The catalog is loaded only after the request passes its limits. Planning makes no native
+/// calls; dispatch goes through `execute_prepared_task` with no approval grants.
+pub async fn run_task(
+    request: &str,
+    load_catalog: impl FnOnce() -> Result<Vec<AppCatalogEntry>, DeskActError>,
+    planner: &impl ActionPlanner,
+    adapter: &mut impl ActionAdapter,
+    restore: &mut dyn ManualRestorePrompt,
+    coordinator: &TaskCoordinator,
+    cancellation: &CancellationToken,
+) -> Result<TaskExecutionReport, DeskActError> {
+    let prepared = prepare_task_request(request, load_catalog, planner).await?;
+    execute_prepared_task(
+        prepared,
+        Vec::new(),
+        adapter,
+        Some(restore),
+        coordinator,
+        cancellation,
+    )
+}
+
+/// Validate request limits and scope, then build a plan from a registered workflow or the primary model.
+pub async fn prepare_task_request(
+    request: &str,
+    load_catalog: impl FnOnce() -> Result<Vec<AppCatalogEntry>, DeskActError>,
+    planner: &impl ActionPlanner,
+) -> Result<PreparedTask, DeskActError> {
+    if request.trim().is_empty()
+        || request.chars().count() > 4_000
+        || request.chars().any(char::is_control)
+    {
+        return Err(DeskActError::new(
+            "Task request must be non-empty, at most 4,000 characters, and contain no control characters".into(),
+        ));
+    }
+    let catalog = load_catalog()?;
+    validate_open_app_request(request, &catalog)?;
+    let (plan, route) = match registered_open_workflow(request, &catalog)? {
+        Some((plan, _entry)) => (plan, "registered_workflow"),
+        None => {
+            let context = model_candidate_context(&catalog)?;
+            let plan = planner.plan(request, &context).await?;
+            validate_single_open_app_plan(&plan)?;
+            (plan, "primary_model")
+        }
+    };
+    Ok(PreparedTask {
+        plan,
+        catalog,
+        route: route.to_owned(),
+    })
+}
+
+fn validate_single_open_app_plan(plan: &ActionPlan) -> Result<(), DeskActError> {
+    if plan.steps.len() != 1 || plan.steps[0].operation != "open_app" {
+        return Err(DeskActError::new(
+            "The action plan must contain exactly one supported open_app step; no actions were executed".into(),
+        ));
+    }
+    Ok(())
+}
 
 /// Process-local gate that allows only one mutating task to execute at a time.
 #[derive(Default)]
@@ -386,5 +490,341 @@ fn simulate_ui_interference_state(
         },
         queued_requests: 0,
         unstarted_steps: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, sync::Mutex};
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::{
+        ActionPlanStep, ActionScope, AppCatalogSource, ApprovalGrant, NativeTargetResolution,
+        ResolvedNativeTarget, approval::RecordingActionAdapter, explicitly_approve, open_app_plan,
+        request_approval,
+    };
+
+    /// Planner fixture that returns one scripted plan and records the candidate context it received.
+    struct FixturePlanner {
+        plan: Option<ActionPlan>,
+        contexts: Mutex<Vec<String>>,
+    }
+
+    impl ActionPlanner for FixturePlanner {
+        async fn plan(
+            &self,
+            _request: &str,
+            candidate_context: &str,
+        ) -> Result<ActionPlan, DeskActError> {
+            self.contexts
+                .lock()
+                .unwrap()
+                .push(candidate_context.to_owned());
+            self.plan
+                .clone()
+                .ok_or_else(|| DeskActError::new("fixture planner was not expected".into()))
+        }
+    }
+
+    /// Restore prompt fixture that replays scripted user answers.
+    struct ScriptedRestore {
+        answers: Vec<bool>,
+        prompts: Vec<String>,
+    }
+
+    impl ManualRestorePrompt for ScriptedRestore {
+        fn confirm_restored(
+            &mut self,
+            _app: &DiscoveredApp,
+            window: &NativeWindow,
+        ) -> Result<bool, DeskActError> {
+            self.prompts.push(window.title.clone());
+            Ok(!self.answers.is_empty() && self.answers.remove(0))
+        }
+    }
+
+    fn calculator() -> AppCatalogEntry {
+        AppCatalogEntry {
+            id: "calculator-id".into(),
+            name: "Calculator".into(),
+            target: "C:\\Windows\\System32\\calc.exe".into(),
+            arguments: String::new(),
+            working_directory: String::new(),
+            source: AppCatalogSource::UserConfigured,
+            aliases: Vec::new(),
+        }
+    }
+
+    fn window(minimized: bool) -> NativeWindow {
+        NativeWindow {
+            id: "window-1".into(),
+            title: "Calculator".into(),
+            app_name: "Calculator".into(),
+            accessible: true,
+            minimized,
+            is_focused: false,
+            visible: true,
+            pid: 1,
+        }
+    }
+
+    fn ready() -> Result<NativeTargetResolution, DeskActError> {
+        Ok(NativeTargetResolution::Ready(ResolvedNativeTarget {
+            app: calculator().as_discovered_app(),
+            window: window(false),
+            snapshot_id: "snapshot-1".into(),
+            ref_count: 3,
+        }))
+    }
+
+    fn minimized() -> Result<NativeTargetResolution, DeskActError> {
+        Ok(NativeTargetResolution::NeedsManualRestore {
+            app: calculator().as_discovered_app(),
+            window: window(true),
+        })
+    }
+
+    fn open_scope() -> ActionScope {
+        ActionScope {
+            action: "open_app".into(),
+            target: "calculator-id".into(),
+            parameters: BTreeMap::from([("app_id".into(), json!("calculator-id"))]),
+        }
+    }
+
+    /// Run `run_task` on a current-thread runtime with one Calculator catalog entry.
+    fn run(
+        request: &str,
+        planner: &FixturePlanner,
+        adapter: &mut RecordingActionAdapter,
+        restore: &mut ScriptedRestore,
+    ) -> Result<TaskExecutionReport, DeskActError> {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(run_task(
+                request,
+                || Ok(vec![calculator()]),
+                planner,
+                adapter,
+                restore,
+                &TaskCoordinator::default(),
+                &CancellationToken::default(),
+            ))
+    }
+
+    fn no_planner() -> FixturePlanner {
+        FixturePlanner {
+            plan: None,
+            contexts: Mutex::default(),
+        }
+    }
+
+    fn no_restore() -> ScriptedRestore {
+        ScriptedRestore {
+            answers: Vec::new(),
+            prompts: Vec::new(),
+        }
+    }
+
+    /// Dispatch a Calculator plan whose second step uses `operation`.
+    fn execute_with_second_step(
+        operation: &str,
+        approvals: Vec<ApprovalGrant>,
+        adapter: &mut RecordingActionAdapter,
+    ) -> Result<TaskExecutionReport, DeskActError> {
+        let mut plan = open_app_plan(&calculator());
+        plan.steps.push(ActionPlanStep {
+            operation: operation.into(),
+            ..plan.steps[0].clone()
+        });
+        execute_prepared_task(
+            PreparedTask {
+                plan,
+                catalog: vec![calculator()],
+                route: "primary_model".into(),
+            },
+            approvals,
+            adapter,
+            None,
+            &TaskCoordinator::default(),
+            &CancellationToken::default(),
+        )
+    }
+
+    /// An exact catalog name takes the registered workflow and never consults the planner.
+    #[test]
+    fn registered_route_dispatches_the_exact_scope_without_planning() {
+        let planner = no_planner();
+        let mut adapter = RecordingActionAdapter::default();
+        adapter.outcomes.push_back(ready());
+
+        let report = run("open Calculator", &planner, &mut adapter, &mut no_restore()).unwrap();
+
+        assert_eq!(report.route, "registered_workflow");
+        assert_eq!(report.status, "completed");
+        assert_eq!(report.evidence[0].snapshot_id, "snapshot-1");
+        assert_eq!(adapter.executed, vec![open_scope()]);
+        assert!(planner.contexts.lock().unwrap().is_empty());
+    }
+
+    /// An unmatched request is planned by the primary model from IDs and display names only.
+    #[test]
+    fn model_route_plans_from_catalog_candidates_then_dispatches() {
+        let planner = FixturePlanner {
+            plan: Some(open_app_plan(&calculator())),
+            contexts: Mutex::default(),
+        };
+        let mut adapter = RecordingActionAdapter::default();
+        adapter.outcomes.push_back(ready());
+
+        let report = run(
+            "open my calculator",
+            &planner,
+            &mut adapter,
+            &mut no_restore(),
+        )
+        .unwrap();
+
+        assert_eq!(report.route, "primary_model");
+        assert_eq!(report.status, "completed");
+        assert_eq!(adapter.executed, vec![open_scope()]);
+        let contexts = planner.contexts.lock().unwrap();
+        assert!(contexts[0].contains("calculator-id"));
+        assert!(!contexts[0].contains("calc.exe"));
+    }
+
+    /// An operation without a local risk classification rejects the plan before any dispatch.
+    #[test]
+    fn unclassified_operation_is_rejected_before_dispatch() {
+        let mut adapter = RecordingActionAdapter::default();
+        let error = execute_with_second_step("click", Vec::new(), &mut adapter).unwrap_err();
+        assert!(error.to_string().contains("no local risk classification"));
+        assert!(error.to_string().contains("no actions were executed"));
+        assert!(adapter.executed.is_empty());
+    }
+
+    /// A consequential step needs an exact grant, and even then this executor does not support it.
+    #[test]
+    fn consequential_operation_without_grant_is_rejected_before_dispatch() {
+        let mut adapter = RecordingActionAdapter::default();
+        let error = execute_with_second_step("delete_file", Vec::new(), &mut adapter).unwrap_err();
+        assert!(error.to_string().contains("without an explicit approval"));
+        assert!(adapter.executed.is_empty());
+
+        let scope = ActionScope {
+            action: "delete_file".into(),
+            ..open_scope()
+        };
+        let grant = explicitly_approve(request_approval(&scope).unwrap().unwrap());
+        let error = execute_with_second_step("delete_file", vec![grant], &mut adapter).unwrap_err();
+        assert!(error.to_string().contains("unsupported operation"));
+        assert!(adapter.executed.is_empty());
+    }
+
+    /// A second mutating task is refused while the mutation lease is held.
+    #[test]
+    fn busy_mutation_lease_rejects_the_task_before_dispatch() {
+        let coordinator = TaskCoordinator::default();
+        let _active = coordinator.try_start_mutating().unwrap();
+        let mut adapter = RecordingActionAdapter::default();
+
+        let error = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(run_task(
+                "open Calculator",
+                || Ok(vec![calculator()]),
+                &no_planner(),
+                &mut adapter,
+                &mut no_restore(),
+                &coordinator,
+                &CancellationToken::default(),
+            ))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("already active"));
+        assert!(adapter.executed.is_empty());
+    }
+
+    /// Cancellation before a step leaves it and every later step not attempted.
+    #[test]
+    fn cancellation_reports_remaining_steps_as_not_attempted() {
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let mut adapter = RecordingActionAdapter::default();
+
+        let report = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(run_task(
+                "open Calculator",
+                || Ok(vec![calculator()]),
+                &no_planner(),
+                &mut adapter,
+                &mut no_restore(),
+                &TaskCoordinator::default(),
+                &cancellation,
+            ))
+            .unwrap();
+
+        assert_eq!(report.status, "failed");
+        assert_eq!(
+            report.unresolved_steps,
+            vec!["Step 1 (open Calculator): not attempted because the task was cancelled"]
+        );
+        assert!(adapter.executed.is_empty());
+    }
+
+    /// A minimized window is re-resolved after the user confirms a manual restore.
+    #[test]
+    fn minimized_window_resumes_after_manual_restore() {
+        let mut adapter = RecordingActionAdapter::default();
+        adapter.outcomes.extend([minimized(), ready()]);
+        let mut restore = ScriptedRestore {
+            answers: vec![true],
+            prompts: Vec::new(),
+        };
+
+        let report = run("open Calculator", &no_planner(), &mut adapter, &mut restore).unwrap();
+
+        assert_eq!(report.status, "completed");
+        assert_eq!(restore.prompts, vec!["Calculator"]);
+        assert_eq!(adapter.executed.len(), 1);
+        assert_eq!(adapter.resumed, vec!["Calculator"]);
+    }
+
+    /// Declining the restore prompt stops the step without re-resolving or relaunching.
+    #[test]
+    fn cancelled_manual_restore_is_unresolved() {
+        let mut adapter = RecordingActionAdapter::default();
+        adapter.outcomes.push_back(minimized());
+        let mut restore = no_restore();
+
+        let report = run("open Calculator", &no_planner(), &mut adapter, &mut restore).unwrap();
+
+        assert_eq!(report.status, "failed");
+        assert_eq!(
+            report.unresolved_steps,
+            vec!["Step 1 (open Calculator): Resolution cancelled; no window was selected"]
+        );
+        assert_eq!(restore.prompts, vec!["Calculator"]);
+        assert!(adapter.resumed.is_empty());
+    }
+
+    #[test]
+    fn model_plan_must_contain_exactly_one_open_app_step() {
+        let mut plan = open_app_plan(&calculator());
+        plan.steps.push(plan.steps[0].clone());
+        assert!(validate_single_open_app_plan(&plan).is_err());
+    }
+
+    #[test]
+    fn model_plan_rejects_other_single_step_operations() {
+        let mut plan = open_app_plan(&calculator());
+        plan.steps[0].operation = "delete_file".into();
+        assert!(validate_single_open_app_plan(&plan).is_err());
     }
 }

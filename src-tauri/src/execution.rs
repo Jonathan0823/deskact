@@ -5,9 +5,12 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 use crate::{
-    ActionPlan, ActionPlanStep, AppCatalogEntry, DeskActError, NativeTargetResolution,
-    load_app_catalog, prepare_app_selection, request_action_plan_with_context,
-    validate_action_plan_json,
+    ActionAdapter, ActionPlan, ActionPlanStep, ActionRiskClass, ActionScope, AppCatalogEntry,
+    ApprovalGrant, CancellationToken, DeliveryDisposition, DeskActError, DiscoveredApp,
+    ManualRestorePrompt, NativeTargetResolution, PostconditionState, RecoveryDecision,
+    TaskCoordinator, VerifiedNativeCli,
+    approval::{DispatchOutcome, authorize_and_dispatch},
+    classify_action, prepare_app_selection, recovery_decision, validate_action_plan_json,
 };
 
 /// Public result from one completed task-execution request.
@@ -42,57 +45,61 @@ pub struct TaskExecutionEvidence {
     pub ref_count: usize,
 }
 
-/// A locally validated app-opening request ready for native execution.
+/// A locally validated app-opening request ready for policy-bounded dispatch.
 #[derive(Debug, Clone)]
 pub struct PreparedTask {
-    plan: ActionPlan,
-    catalog: Vec<AppCatalogEntry>,
-    route: String,
+    pub(crate) plan: ActionPlan,
+    pub(crate) catalog: Vec<AppCatalogEntry>,
+    pub(crate) route: String,
 }
 
-/// Validate and prepare a request using the local catalog and primary model when needed.
-pub async fn prepare_task_request(request: &str) -> Result<PreparedTask, DeskActError> {
-    if request.trim().is_empty()
-        || request.chars().count() > 4_000
-        || request.chars().any(char::is_control)
-    {
-        return Err(DeskActError::new(
-            "Task request must be non-empty, at most 4,000 characters, and contain no control characters".into(),
-        ));
-    }
-    let catalog = load_app_catalog()?;
-    validate_open_app_request(request, &catalog)?;
-    let (plan, route) = match registered_open_workflow(request, &catalog)? {
-        Some((plan, _entry)) => (plan, "registered_workflow"),
-        None => {
-            let context = model_candidate_context(&catalog)?;
-            let plan = request_action_plan_with_context(request, Some(&context)).await?;
-            validate_single_open_app_plan(&plan)?;
-            (plan, "primary_model")
+/// Action adapter that launches catalog entries through the verified native CLI.
+///
+/// The CLI connection is made on first dispatch, so a plan rejected by policy never runs it.
+#[derive(Default)]
+pub struct NativeActionAdapter {
+    cli: Option<VerifiedNativeCli>,
+}
+
+impl NativeActionAdapter {
+    /// Return the verified CLI, connecting on first use.
+    fn cli(&mut self) -> Result<&VerifiedNativeCli, DeskActError> {
+        if self.cli.is_none() {
+            self.cli = Some(VerifiedNativeCli::connect()?);
         }
-    };
-    Ok(PreparedTask {
-        plan,
-        catalog,
-        route: route.to_owned(),
-    })
-}
-
-fn validate_single_open_app_plan(plan: &ActionPlan) -> Result<(), DeskActError> {
-    if plan.steps.len() != 1 || plan.steps[0].operation != "open_app" {
-        return Err(DeskActError::new(
-            "The action plan must contain exactly one supported open_app step; no actions were executed".into(),
-        ));
+        Ok(self.cli.as_ref().expect("native CLI initialized"))
     }
-    Ok(())
 }
 
-/// Execute a prepared request through the native resolver supplied by the host.
-pub fn execute_prepared_task(
-    prepared: PreparedTask,
-    resolve: impl FnMut(&AppCatalogEntry) -> Result<NativeTargetResolution, DeskActError>,
-) -> Result<TaskExecutionReport, DeskActError> {
-    execute_action_plan(&prepared.plan, &prepared.catalog, &prepared.route, resolve)
+impl ActionAdapter for NativeActionAdapter {
+    fn dispatch(
+        &mut self,
+        scope: &ActionScope,
+        catalog: &[AppCatalogEntry],
+    ) -> Result<NativeTargetResolution, DeskActError> {
+        if scope.action != "open_app" {
+            return Err(DeskActError::new(format!(
+                "The native action adapter cannot perform `{}`; no app was launched",
+                scope.action
+            )));
+        }
+        let app = catalog
+            .iter()
+            .find(|entry| entry.id == scope.target)
+            .ok_or_else(|| {
+                DeskActError::new(
+                    "The action target is outside the local catalog; no app was launched".into(),
+                )
+            })?;
+        self.cli()?.resolve_target(app.as_discovered_app())
+    }
+
+    fn resume_after_manual_restore(
+        &mut self,
+        app: DiscoveredApp,
+    ) -> Result<NativeTargetResolution, DeskActError> {
+        self.cli()?.resume_after_manual_restore(app)
+    }
 }
 
 /// Validate that a request is one complete, explicit app-opening intent within the current executor scope.
@@ -205,38 +212,27 @@ pub fn open_app_plan(entry: &AppCatalogEntry) -> ActionPlan {
     }
 }
 
-/// Apply Rust's per-step risk policy to the supported native app-opening operation.
+/// Prevalidate the whole plan, then dispatch each authorized step through the action adapter.
 ///
-/// A launch from a validated catalog entry is a reversible local action and is allowed without
-/// confirmation. Shortcut arguments and every other operation remain denied by this first slice.
-fn apply_open_app_risk_policy(
-    index: usize,
-    step: &ActionPlanStep,
-    app: &AppCatalogEntry,
-) -> Result<(), DeskActError> {
-    if step.operation != "open_app" {
-        return Err(DeskActError::new(format!(
-            "Action plan step {index} uses unsupported operation `{}`; no actions were executed",
-            step.operation
-        )));
-    }
-    if !app.arguments.trim().is_empty() {
-        return Err(DeskActError::new(format!(
-            "Action plan step {index} selects `{}` whose shortcut requires unsupported arguments; no actions were executed",
-            app.name
-        )));
-    }
-    Ok(())
-}
-
-/// Prevalidate the entire plan, then execute its supported app-opening steps through a resolver.
-pub fn execute_action_plan(
-    plan: &ActionPlan,
-    catalog: &[AppCatalogEntry],
-    route: &str,
-    mut resolve: impl FnMut(&AppCatalogEntry) -> Result<NativeTargetResolution, DeskActError>,
+/// Every step becomes an action scope classified by `classify_action`. An unclassified step, a
+/// consequential step without an exact matching approval grant, an operation this executor does
+/// not support, shortcut arguments, or an unsupported postcondition rejects the plan before any
+/// dispatch. Dispatch holds the mutation lease, checks cancellation before each step, and stops at
+/// the first outcome that recovery policy does not let it continue past.
+pub fn execute_prepared_task(
+    prepared: PreparedTask,
+    mut approvals: Vec<ApprovalGrant>,
+    adapter: &mut impl ActionAdapter,
+    mut restore: Option<&mut dyn ManualRestorePrompt>,
+    coordinator: &TaskCoordinator,
+    cancellation: &CancellationToken,
 ) -> Result<TaskExecutionReport, DeskActError> {
-    let serialized_plan = serde_json::to_string(plan)
+    let PreparedTask {
+        plan,
+        catalog,
+        route,
+    } = prepared;
+    let serialized_plan = serde_json::to_string(&plan)
         .map_err(|_| DeskActError::new("Could not revalidate the action plan".into()))?;
     let plan = validate_action_plan_json(&serialized_plan)?;
     let mut selected = Vec::with_capacity(plan.steps.len());
@@ -263,7 +259,42 @@ pub fn execute_action_plan(
                     index + 1
                 ))
             })?;
-        apply_open_app_risk_policy(index + 1, step, &app)?;
+        let scope = ActionScope {
+            action: step.operation.clone(),
+            target: app.id.clone(),
+            parameters: step.parameters.clone(),
+        };
+        let risk_class = classify_action(&scope).map_err(|error| {
+            DeskActError::new(format!(
+                "Action plan step {} was denied: {error}; no actions were executed",
+                index + 1
+            ))
+        })?;
+        let approval = approvals
+            .iter()
+            .position(|grant| grant.scope() == &scope)
+            .map(|position| approvals.swap_remove(position));
+        if risk_class == ActionRiskClass::Consequential && approval.is_none() {
+            return Err(DeskActError::new(format!(
+                "Action plan step {} `{}` is a consequential action without an explicit approval for its exact scope; no actions were executed",
+                index + 1,
+                step.operation
+            )));
+        }
+        if scope.action != "open_app" {
+            return Err(DeskActError::new(format!(
+                "Action plan step {} uses unsupported operation `{}`; no actions were executed",
+                index + 1,
+                step.operation
+            )));
+        }
+        if !app.arguments.trim().is_empty() {
+            return Err(DeskActError::new(format!(
+                "Action plan step {} selects `{}` whose shortcut requires unsupported arguments; no actions were executed",
+                index + 1,
+                app.name
+            )));
+        }
         let verified_expectation = format!("{} is open", app.name);
         if !step
             .expected_outcome
@@ -274,57 +305,121 @@ pub fn execute_action_plan(
                 index + 1
             )));
         }
-        selected.push(app);
+        selected.push((app, scope, approval));
     }
 
+    let Some(_lease) = coordinator.try_start_mutating() else {
+        return Err(DeskActError::new(
+            "A mutating task is already active; this request was not queued. Resubmit after it finishes. No actions were executed".into(),
+        ));
+    };
     let mut evidence = Vec::with_capacity(selected.len());
     let mut unresolved_steps = Vec::new();
-    for (index, app) in selected.iter().enumerate() {
-        let resolution = match resolve(app) {
-            Ok(resolution) => resolution,
-            Err(error) => {
-                unresolved_steps.push(format!("Step {} (open {}): {error}", index + 1, app.name));
-                break;
-            }
+    let mut cancelled = false;
+    for (index, (app, scope, approval)) in selected.iter_mut().enumerate() {
+        if cancellation.is_cancelled() {
+            cancelled = true;
+            break;
+        }
+        // Only the first dispatch is authorized; manual-restore resumes below merely re-observe.
+        let mut outcome = match authorize_and_dispatch(adapter, scope, approval.take(), &catalog) {
+            Ok(DispatchOutcome::Dispatched(outcome)) => outcome,
+            Ok(DispatchOutcome::Withheld(decision)) => Err(DeskActError::new(format!(
+                "the action was not authorized immediately before dispatch ({decision:?})"
+            ))),
+            Err(error) => Err(error),
         };
-        let resolved = match resolution {
-            NativeTargetResolution::Ready(target) => target,
-            NativeTargetResolution::NeedsManualRestore { window, .. } => {
-                unresolved_steps.push(format!(
-                    "Step {} (open {}): window `{}` is minimized and needs manual restoration",
-                    index + 1,
-                    app.name,
-                    window.title
+        while let Ok(NativeTargetResolution::NeedsManualRestore { app, window }) = &outcome {
+            let Some(prompt) = restore.as_deref_mut() else {
+                break;
+            };
+            if cancellation.is_cancelled() {
+                cancelled = true;
+                outcome = Err(DeskActError::new(
+                    "Cancelled while waiting for manual window restoration".into(),
                 ));
                 break;
             }
-        };
-        if !resolved.window.accessible || resolved.window.minimized || resolved.ref_count == 0 {
-            unresolved_steps.push(format!(
-                "Step {} (open {}): resolved window `{}` did not satisfy the accessible, non-minimized snapshot precondition",
-                index + 1,
-                app.name,
-                resolved.window.id
-            ));
-            break;
+            outcome = match prompt.confirm_restored(app, window) {
+                Ok(true) if cancellation.is_cancelled() => {
+                    cancelled = true;
+                    Err(DeskActError::new(
+                        "Cancelled while waiting for manual window restoration".into(),
+                    ))
+                }
+                Ok(true) => adapter.resume_after_manual_restore(app.clone()),
+                Ok(false) => Err(DeskActError::new(
+                    "Resolution cancelled; no window was selected".into(),
+                )),
+                Err(error) => Err(error),
+            };
         }
-        evidence.push(TaskExecutionEvidence {
-            app_id: app.id.clone(),
-            app_name: app.name.clone(),
-            window_id: resolved.window.id,
-            snapshot_id: resolved.snapshot_id,
-            ref_count: resolved.ref_count,
-        });
+        let (delivery, postcondition, failure) = match &outcome {
+            Ok(NativeTargetResolution::Ready(target))
+                if target.window.accessible && !target.window.minimized && target.ref_count > 0 =>
+            {
+                (
+                    DeliveryDisposition::Verified,
+                    PostconditionState::Satisfied,
+                    String::new(),
+                )
+            }
+            Ok(NativeTargetResolution::Ready(target)) => (
+                DeliveryDisposition::DeliveredUnverified,
+                PostconditionState::NotSatisfied,
+                format!(
+                    "resolved window `{}` did not satisfy the accessible, non-minimized snapshot precondition",
+                    target.window.id
+                ),
+            ),
+            Ok(NativeTargetResolution::NeedsManualRestore { window, .. }) => (
+                DeliveryDisposition::DeliveredUnverified,
+                PostconditionState::Unknown,
+                format!(
+                    "window `{}` is minimized and needs manual restoration",
+                    window.title
+                ),
+            ),
+            Err(error) => (
+                DeliveryDisposition::Unknown,
+                PostconditionState::Unknown,
+                error.to_string(),
+            ),
+        };
+        // Relaunching an app is not idempotent, so an unverified open_app is never retried.
+        match (
+            recovery_decision(delivery, postcondition, false, 0),
+            outcome,
+        ) {
+            (RecoveryDecision::Continue, Ok(NativeTargetResolution::Ready(target))) => {
+                evidence.push(TaskExecutionEvidence {
+                    app_id: app.id.clone(),
+                    app_name: app.name.clone(),
+                    window_id: target.window.id,
+                    snapshot_id: target.snapshot_id,
+                    ref_count: target.ref_count,
+                });
+            }
+            _ => {
+                unresolved_steps.push(format!("Step {} (open {}): {failure}", index + 1, app.name));
+                break;
+            }
+        }
     }
-    for (index, app) in selected
+    for (index, (app, _, _)) in selected
         .iter()
         .enumerate()
         .skip(evidence.len() + unresolved_steps.len())
     {
         unresolved_steps.push(format!(
-            "Step {} (open {}): not attempted after an earlier step could not be verified",
+            "Step {} (open {}): not attempted {}",
             index + 1,
-            app.name
+            app.name,
+            if cancelled {
+                "because the task was cancelled"
+            } else {
+                "after an earlier step could not be verified"
+            }
         ));
     }
 
@@ -350,7 +445,7 @@ pub fn execute_action_plan(
         )
     };
     Ok(TaskExecutionReport {
-        route: route.to_owned(),
+        route,
         status: if unresolved_steps.is_empty() {
             "completed".into()
         } else if evidence.is_empty() {
@@ -378,7 +473,85 @@ pub fn model_candidate_context(catalog: &[AppCatalogEntry]) -> Result<String, De
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AppCatalogSource;
+    use crate::{AppCatalogSource, NativeWindow, approval::RecordingActionAdapter};
+
+    struct CancellingPrompt(CancellationToken);
+
+    impl ManualRestorePrompt for CancellingPrompt {
+        fn confirm_restored(
+            &mut self,
+            _app: &DiscoveredApp,
+            _window: &NativeWindow,
+        ) -> Result<bool, DeskActError> {
+            self.0.cancel();
+            Ok(true)
+        }
+    }
+
+    /// Cancelling during manual restoration must not resume, and later steps are not attempted.
+    #[test]
+    fn cancellation_during_manual_restore_stops_without_resuming() {
+        let entry = |id: &str, name: &str| AppCatalogEntry {
+            id: id.into(),
+            name: name.into(),
+            target: format!("C:\\Apps\\{name}.exe"),
+            arguments: String::new(),
+            working_directory: String::new(),
+            source: AppCatalogSource::UserConfigured,
+            aliases: Vec::new(),
+        };
+        let (first, second) = (
+            entry("first-id", "First App"),
+            entry("second-id", "Second App"),
+        );
+        let plan = ActionPlan {
+            version: 1,
+            summary: "Open both apps".into(),
+            steps: vec![
+                open_app_plan(&first).steps[0].clone(),
+                open_app_plan(&second).steps[0].clone(),
+            ],
+        };
+        let mut adapter = RecordingActionAdapter::default();
+        adapter
+            .outcomes
+            .push_back(Ok(NativeTargetResolution::NeedsManualRestore {
+                app: first.as_discovered_app(),
+                window: NativeWindow {
+                    id: "w1".into(),
+                    title: "First".into(),
+                    app_name: "First App".into(),
+                    accessible: true,
+                    minimized: true,
+                    is_focused: false,
+                    visible: false,
+                    pid: 1,
+                },
+            }));
+        let cancellation = CancellationToken::default();
+        let mut prompt = CancellingPrompt(cancellation.clone());
+
+        let report = execute_prepared_task(
+            PreparedTask {
+                plan,
+                catalog: vec![first, second],
+                route: "registered_workflow".into(),
+            },
+            Vec::new(),
+            &mut adapter,
+            Some(&mut prompt),
+            &TaskCoordinator::default(),
+            &cancellation,
+        )
+        .expect("cancelled execution should produce a report");
+
+        assert!(adapter.resumed.is_empty());
+        assert_eq!(adapter.executed.len(), 1);
+        assert_eq!(report.unresolved_steps.len(), 2);
+        assert!(
+            report.unresolved_steps[1].contains("not attempted because the task was cancelled")
+        );
+    }
 
     /// A native-resolution error must be returned as evidence-backed unresolved work.
     #[test]
@@ -392,10 +565,23 @@ mod tests {
             source: AppCatalogSource::UserConfigured,
             aliases: Vec::new(),
         };
+        let mut adapter = RecordingActionAdapter::default();
+        adapter
+            .outcomes
+            .push_back(Err(DeskActError::new("fixture resolution failure".into())));
 
-        let report = execute_action_plan(&open_app_plan(&entry), &[entry], "primary_model", |_| {
-            Err(DeskActError::new("fixture resolution failure".into()))
-        })
+        let report = execute_prepared_task(
+            PreparedTask {
+                plan: open_app_plan(&entry),
+                catalog: vec![entry],
+                route: "primary_model".into(),
+            },
+            Vec::new(),
+            &mut adapter,
+            None,
+            &TaskCoordinator::default(),
+            &CancellationToken::default(),
+        )
         .expect("unverified execution should produce a report");
 
         assert_eq!(report.status, "failed");
@@ -404,7 +590,7 @@ mod tests {
         assert!(report.unresolved_steps[0].contains("fixture resolution failure"));
     }
 
-    /// Reject shortcut arguments during whole-plan validation, before any resolver invocation.
+    /// Reject shortcut arguments during whole-plan validation, before any adapter dispatch.
     #[test]
     fn shortcut_arguments_are_rejected_before_resolution() {
         let first = AppCatalogEntry {
@@ -429,51 +615,26 @@ mod tests {
                 open_app_plan(&second).steps[0].clone(),
             ],
         };
-        let catalog = [first, second];
-        let result = execute_action_plan(&plan, &catalog, "registered_workflow", |_| {
-            panic!("invalid later shortcut must not allow an earlier launch")
-        });
+        let mut adapter = RecordingActionAdapter::default();
+        let result = execute_prepared_task(
+            PreparedTask {
+                plan,
+                catalog: vec![first, second],
+                route: "registered_workflow".into(),
+            },
+            Vec::new(),
+            &mut adapter,
+            None,
+            &TaskCoordinator::default(),
+            &CancellationToken::default(),
+        );
         assert!(
             result
                 .unwrap_err()
                 .to_string()
                 .contains("unsupported arguments")
         );
-    }
-
-    #[test]
-    fn model_plan_must_contain_exactly_one_open_app_step() {
-        let plan = ActionPlan {
-            version: 1,
-            summary: "Open two apps".into(),
-            steps: vec![
-                ActionPlanStep {
-                    operation: "open_app".into(),
-                    parameters: BTreeMap::new(),
-                    expected_outcome: String::new(),
-                },
-                ActionPlanStep {
-                    operation: "open_app".into(),
-                    parameters: BTreeMap::new(),
-                    expected_outcome: String::new(),
-                },
-            ],
-        };
-        assert!(validate_single_open_app_plan(&plan).is_err());
-    }
-
-    #[test]
-    fn model_plan_rejects_other_single_step_operations() {
-        let plan = ActionPlan {
-            version: 1,
-            summary: "Unsupported action".into(),
-            steps: vec![ActionPlanStep {
-                operation: "delete_file".into(),
-                parameters: BTreeMap::new(),
-                expected_outcome: String::new(),
-            }],
-        };
-        assert!(validate_single_open_app_plan(&plan).is_err());
+        assert!(adapter.executed.is_empty());
     }
 
     /// Reject compound requests instead of running only their first open-app portion.

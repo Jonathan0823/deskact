@@ -5,8 +5,9 @@ use std::sync::{
 };
 
 use deskact_core::{
-    CancellationToken, DeskActError, NativeTargetResolution, TaskExecutionReport,
-    VerifiedNativeCli, execute_prepared_task, prepare_task_request,
+    ActionAdapter, ActionScope, AppCatalogEntry, CancellationToken, ChatCompletionsPlanner,
+    DeskActError, DiscoveredApp, NativeActionAdapter, NativeTargetResolution, TaskCoordinator,
+    TaskExecutionReport, execute_prepared_task, load_app_catalog, prepare_task_request,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -61,6 +62,8 @@ pub struct TaskHub {
     next_task_id: AtomicU64,
     next_revision: AtomicU64,
     state: Mutex<HubState>,
+    /// Shared by every task so the mutation lease can conflict across them.
+    coordinator: Arc<TaskCoordinator>,
 }
 
 impl TaskHub {
@@ -192,9 +195,16 @@ pub fn submit_task(
     let task_id = snapshot.task_id;
     let test_fixture = snapshot.test_fixture;
     let cancellation = hub.cancellation_token(task_id).expect("new task token");
+    let coordinator = Arc::clone(&hub.coordinator);
 
     tauri::async_runtime::spawn(async move {
-        let prepared = match prepare_task_request(&request).await {
+        let prepared = match prepare_task_request(
+            &request,
+            load_app_catalog,
+            &ChatCompletionsPlanner,
+        )
+        .await
+        {
             Ok(prepared) => prepared,
             Err(error) => {
                 finish_task(&app_handle, task_id, |snapshot| {
@@ -233,24 +243,19 @@ pub fn submit_task(
         let native_started = Arc::new(AtomicBool::new(false));
         let native_started_worker = Arc::clone(&native_started);
         let outcome = tauri::async_runtime::spawn_blocking(move || {
-            let mut cli = None;
-            execute_prepared_task(prepared, |entry| {
-                if native_cancellation.is_cancelled() {
-                    return Err(DeskActError::new(
-                        "Stop requested before the next app-opening step.".to_owned(),
-                    ));
-                }
-                native_started_worker.store(true, Ordering::Release);
-                if fixture_mode_enabled() {
-                    return fixture_resolution(entry, &native_cancellation);
-                }
-                if cli.is_none() {
-                    cli = Some(VerifiedNativeCli::connect()?);
-                }
-                cli.as_ref()
-                    .expect("native CLI initialized")
-                    .resolve_target(entry.as_discovered_app())
-            })
+            let mut adapter = HudActionAdapter {
+                native: NativeActionAdapter::default(),
+                cancellation: native_cancellation.clone(),
+                native_started: native_started_worker,
+            };
+            execute_prepared_task(
+                prepared,
+                Vec::new(),
+                &mut adapter,
+                None,
+                &coordinator,
+                &native_cancellation,
+            )
         })
         .await;
 
@@ -327,6 +332,38 @@ pub fn submit_task(
     });
 
     Ok(snapshot)
+}
+
+/// HUD action adapter: records that native work started and uses the debug fixture when enabled.
+struct HudActionAdapter {
+    native: NativeActionAdapter,
+    cancellation: CancellationToken,
+    native_started: Arc<AtomicBool>,
+}
+
+impl ActionAdapter for HudActionAdapter {
+    fn dispatch(
+        &mut self,
+        scope: &ActionScope,
+        catalog: &[AppCatalogEntry],
+    ) -> Result<NativeTargetResolution, DeskActError> {
+        self.native_started.store(true, Ordering::Release);
+        if fixture_mode_enabled() {
+            let entry = catalog
+                .iter()
+                .find(|entry| entry.id == scope.target)
+                .ok_or_else(|| DeskActError::new("Fixture target is not in the catalog.".into()))?;
+            return fixture_resolution(entry, &self.cancellation);
+        }
+        self.native.dispatch(scope, catalog)
+    }
+
+    fn resume_after_manual_restore(
+        &mut self,
+        app: DiscoveredApp,
+    ) -> Result<NativeTargetResolution, DeskActError> {
+        self.native.resume_after_manual_restore(app)
+    }
 }
 
 fn update_task(app: &AppHandle, task_id: u64, update: impl FnOnce(&mut TaskSnapshot)) {

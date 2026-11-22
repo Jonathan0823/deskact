@@ -1,11 +1,14 @@
 //! Action classification and exact-scope approval policy.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::DeskActError;
+use crate::{
+    AppCatalogEntry, DeskActError, DiscoveredApp, DiscoverySource, NativeTargetResolution,
+    NativeWindow, ResolvedNativeTarget,
+};
 
 /// Risk classification derived locally from an action identifier, never from model claims.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -43,6 +46,13 @@ pub struct ApprovalRequest {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ApprovalGrant {
     scope: ActionScope,
+}
+
+impl ApprovalGrant {
+    /// Exact action scope this grant authorizes.
+    pub(crate) fn scope(&self) -> &ActionScope {
+        &self.scope
+    }
 }
 
 /// Outcome of one non-destructive action-specific approval simulation.
@@ -140,25 +150,92 @@ pub fn authorize_action(
     })
 }
 
-/// Adapter for one authorized action; the simulation uses a recorder and never mutates the OS.
-trait ActionAdapter {
-    /// Record or perform one action after the approval policy permits dispatch.
-    fn execute(&mut self, scope: &ActionScope);
+/// Seam through which an authorized action scope reaches the desktop.
+///
+/// Callers dispatch only after `authorize_action` allows the exact scope; the adapter performs
+/// the operation against the catalog entry named by the scope target and reports native evidence.
+pub trait ActionAdapter {
+    /// Perform one authorized action scope whose target is an ID in `catalog`.
+    fn dispatch(
+        &mut self,
+        scope: &ActionScope,
+        catalog: &[AppCatalogEntry],
+    ) -> Result<NativeTargetResolution, DeskActError>;
+
+    /// Re-resolve an app after the user manually restored its minimized window; never relaunches it.
+    ///
+    /// It only re-observes native state and performs no action, so it is not a separately
+    /// authorized dispatch.
+    fn resume_after_manual_restore(
+        &mut self,
+        app: DiscoveredApp,
+    ) -> Result<NativeTargetResolution, DeskActError>;
 }
 
-/// Test adapter that records authorized scopes without changing external state.
+/// Adapter that records dispatched scopes and replays scripted outcomes without changing external state.
 #[derive(Default)]
-struct RecordingActionAdapter {
-    executed: Vec<ActionScope>,
+pub(crate) struct RecordingActionAdapter {
+    /// Scopes dispatched after authorization, in order.
+    pub(crate) executed: Vec<ActionScope>,
+    /// App names re-resolved after a manual restore, in order.
+    pub(crate) resumed: Vec<String>,
+    /// Outcomes returned by successive dispatch and resume calls.
+    pub(crate) outcomes: VecDeque<Result<NativeTargetResolution, DeskActError>>,
 }
 
-impl ActionAdapter for RecordingActionAdapter {
-    fn execute(&mut self, scope: &ActionScope) {
-        self.executed.push(scope.clone());
+impl RecordingActionAdapter {
+    /// Return the next scripted outcome; an exhausted script reports that nothing was performed.
+    fn next_outcome(&mut self) -> Result<NativeTargetResolution, DeskActError> {
+        self.outcomes.pop_front().unwrap_or_else(|| {
+            Err(DeskActError::new(
+                "The recording adapter performs no native action".into(),
+            ))
+        })
     }
 }
 
-/// Run a deterministic approval scenario through the same policy check used before adapter dispatch.
+impl ActionAdapter for RecordingActionAdapter {
+    fn dispatch(
+        &mut self,
+        scope: &ActionScope,
+        _catalog: &[AppCatalogEntry],
+    ) -> Result<NativeTargetResolution, DeskActError> {
+        self.executed.push(scope.clone());
+        self.next_outcome()
+    }
+
+    fn resume_after_manual_restore(
+        &mut self,
+        app: DiscoveredApp,
+    ) -> Result<NativeTargetResolution, DeskActError> {
+        self.resumed.push(app.name);
+        self.next_outcome()
+    }
+}
+
+/// Result of re-authorizing one action scope immediately before adapter dispatch.
+#[allow(clippy::large_enum_variant)] // Short-lived and consumed immediately by the caller.
+pub(crate) enum DispatchOutcome {
+    /// The policy allowed the exact scope and the adapter returned this outcome.
+    Dispatched(Result<NativeTargetResolution, DeskActError>),
+    /// The policy withheld dispatch for this reason.
+    Withheld(ApprovalDecision),
+}
+
+/// Re-evaluate risk and approval for the exact scope, then dispatch it only when allowed.
+pub(crate) fn authorize_and_dispatch(
+    adapter: &mut impl ActionAdapter,
+    scope: &ActionScope,
+    approval: Option<ApprovalGrant>,
+    catalog: &[AppCatalogEntry],
+) -> Result<DispatchOutcome, DeskActError> {
+    Ok(match authorize_action(scope, approval)? {
+        ApprovalDecision::Allowed => DispatchOutcome::Dispatched(adapter.dispatch(scope, catalog)),
+        decision => DispatchOutcome::Withheld(decision),
+    })
+}
+
+/// Run a deterministic approval scenario through the same authorize-then-dispatch path the executor uses.
 pub fn simulate_approval_scenario(
     scenario: &str,
 ) -> Result<ApprovalSimulationReport, DeskActError> {
@@ -191,12 +268,38 @@ pub fn simulate_approval_scenario(
     }
 
     let mut adapter = RecordingActionAdapter::default();
-    let authorization = authorize_action(&current_scope, grant)?;
+    // The fixture adapter reports a successful (non-native) outcome so only real failures read as "failed".
+    adapter
+        .outcomes
+        .push_back(Ok(NativeTargetResolution::Ready(ResolvedNativeTarget {
+            app: DiscoveredApp {
+                name: "Fixture".into(),
+                target: "fixture://documents".into(),
+                arguments: String::new(),
+                working_directory: String::new(),
+                source: DiscoverySource::UserConfigured,
+            },
+            window: NativeWindow {
+                id: "fixture".into(),
+                title: "Fixture".into(),
+                app_name: "Fixture".into(),
+                accessible: true,
+                minimized: false,
+                is_focused: true,
+                visible: true,
+                pid: 0,
+            },
+            snapshot_id: "fixture".into(),
+            ref_count: 1,
+        })));
+    let (authorization, dispatch_failed) =
+        match authorize_and_dispatch(&mut adapter, &current_scope, grant, &[])? {
+            DispatchOutcome::Dispatched(result) => (ApprovalDecision::Allowed, result.is_err()),
+            DispatchOutcome::Withheld(decision) => (decision, false),
+        };
     let status = match authorization {
-        ApprovalDecision::Allowed => {
-            adapter.execute(&current_scope);
-            "executed"
-        }
+        ApprovalDecision::Allowed if dispatch_failed => "failed",
+        ApprovalDecision::Allowed => "executed",
         ApprovalDecision::RequiresApproval => "awaiting_approval",
         ApprovalDecision::StaleApproval => "approval_stale",
     };
@@ -287,5 +390,19 @@ mod tests {
             authorize_action(&changed, Some(stale_grant)).unwrap(),
             ApprovalDecision::StaleApproval
         );
+    }
+
+    /// An allowed action whose adapter dispatch errs is still recorded as attempted, with the error surfaced.
+    #[test]
+    fn allowed_dispatch_error_records_attempt_and_surfaces_failure() {
+        let scope = fixture_scope();
+        let grant = explicitly_approve(request_approval(&scope).unwrap().unwrap());
+        let mut adapter = RecordingActionAdapter::default();
+        adapter
+            .outcomes
+            .push_back(Err(DeskActError::new("dispatch failed".into())));
+        let outcome = authorize_and_dispatch(&mut adapter, &scope, Some(grant), &[]).unwrap();
+        assert!(matches!(outcome, DispatchOutcome::Dispatched(Err(_))));
+        assert_eq!(adapter.executed, vec![scope]);
     }
 }
