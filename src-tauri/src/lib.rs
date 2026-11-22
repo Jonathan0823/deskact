@@ -46,12 +46,18 @@ pub(crate) use native::{
 };
 pub use native::{VerifiedNativeCli, native_inventory, preflight, resolve_native_target};
 mod acceptance;
+mod agent_loop;
 mod agent_tools;
 mod snapshot;
 mod step_policy;
 pub use acceptance::{
     NotepadAcceptanceReport, run_calculator_acceptance, run_file_explorer_acceptance,
     run_notepad_acceptance, run_vlc_acceptance,
+};
+pub use agent_loop::{
+    AGENT_TOOL_PROMPT, AgentBudget, AgentDesktop, AgentLoopReport, AgentModel, AgentOutcome,
+    BudgetLimit, ChatCompletionsAgentModel, MAX_EXECUTED_TOOL_CALLS, MAX_MODEL_TURNS,
+    MAX_TASK_DURATION, frame_untrusted, run_agent_loop,
 };
 pub use agent_tools::{OBSERVATION_BYTE_CAP, Observation, TargetWindowTools};
 pub use step_policy::{
