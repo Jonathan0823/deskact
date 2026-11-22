@@ -59,6 +59,11 @@ pub use agent_loop::{
     BudgetLimit, ChatCompletionsAgentModel, MAX_EXECUTED_TOOL_CALLS, MAX_MODEL_TURNS,
     MAX_TASK_DURATION, UserAnswers, frame_untrusted, run_agent_loop, run_agent_loop_with_answers,
 };
+mod agent_gate;
+pub use agent_gate::{
+    ApprovalExpectation, ApprovalRecord, GATE_RUNS_PER_TASK, GateConfig, GateEnvironment,
+    GateReport, GateRunRecord, GateTask, gate_tasks, run_gate, run_gate_with,
+};
 mod agent_run;
 pub use agent_run::{
     AgentTaskReport, ConsolePrompts, Expectation, ReportingDesktop, TaskRoute, Verification,

@@ -1,21 +1,23 @@
 //! Developer-only command-line harness for native preflight and inventory.
 
 use std::{
-    env,
+    env, fs,
     future::Future,
     io::{self, Write},
+    path::PathBuf,
     process::ExitCode,
 };
 
 use deskact_core::{
     AgentBudget, CancellationToken, ChatCompletionsAgentModel, ChatCompletionsPlanner,
-    ConsolePrompts, DeskActError, DiscoveredApp, Expectation, ManualRestorePrompt,
-    NativeActionAdapter, NativeTargetResolution, NativeWindow, ReportingDesktop, TargetWindowTools,
-    TaskCoordinator, TaskRoute, VerifiedNativeCli, add_user_app_entry, edit_user_app_entry,
-    load_app_catalog, native_inventory, preflight, prepare_app_selection, request_action_plan,
-    request_agent_turn, resolve_native_target, route_request, run_agent_task,
-    run_calculator_acceptance, run_file_explorer_acceptance, run_notepad_acceptance, run_task,
-    run_vlc_acceptance, simulate_approval_scenario, simulate_task_scenario, test_llm_connection,
+    ConsolePrompts, DeskActError, DiscoveredApp, Expectation, GATE_RUNS_PER_TASK, GateConfig,
+    GateEnvironment, GateTask, ManualRestorePrompt, NativeActionAdapter, NativeTargetResolution,
+    NativeWindow, ReportingDesktop, TargetWindowTools, TaskCoordinator, TaskRoute,
+    VerifiedNativeCli, add_user_app_entry, edit_user_app_entry, load_app_catalog, native_inventory,
+    preflight, prepare_app_selection, request_action_plan, request_agent_turn,
+    resolve_native_target, route_request, run_agent_task, run_calculator_acceptance,
+    run_file_explorer_acceptance, run_gate, run_notepad_acceptance, run_task, run_vlc_acceptance,
+    simulate_approval_scenario, simulate_task_scenario, test_llm_connection,
     validate_action_plan_json,
 };
 
@@ -121,6 +123,7 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("agent-gate") => run_agent_gate_command(&env::args().skip(2).collect::<Vec<_>>()),
         Some("inventory") => match native_inventory() {
             Ok(inventory) => {
                 println!(
@@ -153,7 +156,7 @@ fn main() -> ExitCode {
 
         _ => {
             eprintln!(
-                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|llm <test|tool-turn <request>|plan <request>|validate-plan>|task <simulate --scenario <name>|approval-simulate --scenario <name>|execute --request <request>>|notepad-acceptance [--runs <count>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
+                "Usage: deskact-dev <preflight|inventory|resolve <app-name>|app-catalog <list|add|edit|prepare>|llm <test|tool-turn <request>|plan <request>|validate-plan>|task <simulate --scenario <name>|approval-simulate --scenario <name>|execute --request <request>>|notepad-acceptance [--runs <count>]|agent-gate [--runs <count>] [--workspace <dir>] [--report <path>]|file-explorer-acceptance|calculator-acceptance|vlc-acceptance>"
             );
             ExitCode::from(2)
         }
@@ -415,6 +418,184 @@ fn run_agent_task_command(options: &ExecuteOptions) -> ExitCode {
             }
         }
         Err(error) => fail(format!("Agent task failed: {error}")),
+    }
+}
+
+/// Parsed `agent-gate` arguments.
+struct GateOptions {
+    runs: u32,
+    workspace: PathBuf,
+    report: Option<PathBuf>,
+}
+
+fn parse_gate_options(arguments: &[String]) -> Result<GateOptions, String> {
+    let mut options = GateOptions {
+        runs: GATE_RUNS_PER_TASK,
+        workspace: env::temp_dir().join("deskact-agent-gate"),
+        report: None,
+    };
+    let mut index = 0;
+    while index < arguments.len() {
+        let value = arguments
+            .get(index + 1)
+            .ok_or_else(|| format!("{} requires a value", arguments[index]))?;
+        match arguments[index].as_str() {
+            "--runs" => {
+                options.runs = value
+                    .parse()
+                    .ok()
+                    .filter(|runs| *runs > 0)
+                    .ok_or("--runs must be a positive integer")?;
+            }
+            "--workspace" => options.workspace = value.into(),
+            "--report" => options.report = Some(value.into()),
+            other => return Err(format!("unknown option {other}")),
+        }
+        index += 2;
+    }
+    Ok(options)
+}
+
+/// Drop any `user:password@` part so credentials never reach the report.
+fn redact_endpoint(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+            let host = authority.rsplit('@').next().unwrap_or(authority);
+            format!("{scheme}://{host}/{path}")
+        }
+        None => url.to_owned(),
+    }
+}
+
+/// Reads one stdin line per refill, so prompts in different places share stdin without lost input.
+struct StdinLines {
+    line: Vec<u8>,
+    position: usize,
+}
+
+impl io::Read for StdinLines {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let available = io::BufRead::fill_buf(self)?;
+        let count = available.len().min(out.len());
+        out[..count].copy_from_slice(&available[..count]);
+        io::BufRead::consume(self, count);
+        Ok(count)
+    }
+}
+
+impl io::BufRead for StdinLines {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.position >= self.line.len() {
+            let mut text = String::new();
+            io::stdin().read_line(&mut text)?;
+            self.line = text.into_bytes();
+            self.position = 0;
+        }
+        Ok(&self.line[self.position..])
+    }
+    fn consume(&mut self, amount: usize) {
+        self.position += amount;
+    }
+}
+
+fn read_stdin_line() -> String {
+    let mut line = String::new();
+    let _ = io::stdin().read_line(&mut line);
+    line.trim().to_owned()
+}
+
+/// Gate environment driven by the operator: they open each Notepad document and report stray keys.
+struct OperatorGateEnvironment;
+
+impl GateEnvironment for OperatorGateEnvironment {
+    type Desktop = ReportingDesktop<TargetWindowTools, io::Stderr>;
+
+    fn start_run(&mut self, task: &GateTask, run: u32) -> Result<Self::Desktop, DeskActError> {
+        let seed = task.seed_text.as_deref().map_or_else(
+            || "empty".to_owned(),
+            |text| format!("holding exactly \"{text}\" (type it, no trailing newline)"),
+        );
+        eprint!(
+            "\n[{} run {run}] Close other Notepad windows, open a NEW Notepad document ({seed}), keep it in front, then press Enter: ",
+            task.id
+        );
+        let _ = io::stderr().flush();
+        read_stdin_line();
+        let target = resolve_for_agent("notepad")?;
+        let cli = VerifiedNativeCli::connect()?;
+        Ok(ReportingDesktop::new(
+            TargetWindowTools::new(cli, target.window),
+            io::stderr(),
+        ))
+    }
+
+    fn wrong_window_keystrokes(&mut self, task: &GateTask, run: u32) -> u32 {
+        eprint!(
+            "[{} run {run}] How many keystrokes landed in any window other than that Notepad (0 if none)? ",
+            task.id
+        );
+        let _ = io::stderr().flush();
+        read_stdin_line().parse().unwrap_or(0)
+    }
+}
+
+/// Run the Notepad 19/20 agent-loop gate interactively and print the report.
+fn run_agent_gate_command(arguments: &[String]) -> ExitCode {
+    let options = match parse_gate_options(arguments) {
+        Ok(options) => options,
+        Err(message) => {
+            eprintln!(
+                "{message}\nUsage: deskact-dev agent-gate [--runs <count>] [--workspace <dir>] [--report <path>]"
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let (Ok(model), Ok(endpoint)) = (
+        env::var("DESKACT_LLM_MODEL"),
+        env::var("DESKACT_LLM_BASE_URL"),
+    ) else {
+        return fail("Set DESKACT_LLM_MODEL and DESKACT_LLM_BASE_URL to the daily model".into());
+    };
+    let config = GateConfig {
+        model,
+        endpoint: redact_endpoint(&endpoint),
+        runs_per_task: options.runs,
+        workspace: options.workspace,
+        budget: AgentBudget::default(),
+    };
+    let mut prompts = ConsolePrompts::new(
+        StdinLines {
+            line: Vec::new(),
+            position: 0,
+        },
+        io::stderr(),
+    );
+    let report = match run_task_async(async {
+        Ok(run_gate(
+            &config,
+            &mut OperatorGateEnvironment,
+            &mut ChatCompletionsAgentModel,
+            &mut prompts,
+        )
+        .await)
+    }) {
+        Ok(report) => report,
+        Err(error) => return fail(error.to_string()),
+    };
+    let text = report.render();
+    println!("{text}");
+    if let Some(path) = options.report {
+        let json = serde_json::to_string_pretty(&report.to_json()).unwrap_or_default();
+        if fs::write(&path, &text).is_err() || fs::write(path.with_extension("json"), json).is_err()
+        {
+            eprintln!("Could not write the report to {}", path.display());
+        }
+    }
+    if report.meets_target() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 
